@@ -85,10 +85,12 @@ class LayerPredictor:
         results = []
         for b in bboxs:
             bbox = b / self.resolution
-            results.append(self.predict_col(bbox))
+            if self.verbose:
+                print("\nWORKING ON", bbox)
+            results.append(self._predict_col(bbox))
         return results
 
-    def predict_col(self, bbox):
+    def _predict_col(self, bbox):
         """
         makes layer boundary predictions for the particular column provided by bbox
         :param bbox: bounding box of column
@@ -96,7 +98,7 @@ class LayerPredictor:
         """
         soma_features_root_ids = set(self.soma_features.seg_id)
 
-        auto_col_cells = self.auto_cells[self.auto_cells.pt_position.apply(Predictor.in_bbox, args=[bbox])].copy()
+        auto_col_cells = self.auto_cells[self.auto_cells.pt_position.apply(LayerPredictor.in_bbox, args=[bbox])].copy()
         auto_col_cells["mm_depth"] = [auto_col_cells.pt_position.iloc[i][1] * self.resolution[1] / 1_000_000 for i in
                                       range(len(auto_col_cells))]
         # add soma features columns to auto_col_cells
@@ -115,11 +117,11 @@ class LayerPredictor:
 
         auto_exc_cells = auto_col_cells.query("classification_system == 'aibs_coarse_excitatory'")
 
-        bin_centers, varis = self.calculate_features(bbox, auto_exc_cells)
+        bin_centers, varis = self._calculate_features(bbox, auto_exc_cells)
 
-        model = self.hmm_fit(bin_centers, varis)
+        model = self._hmm_fit(bin_centers, varis)
 
-        bounds, layers, posteriors = self.hmm_predict(model, bin_centers, varis)
+        bounds, layers, posteriors = self._hmm_predict(model, bin_centers, varis)
 
         model_means = np.array([model.means_[l] for l in layers])
         model_stds = np.array([np.diagonal(np.sqrt(model.covars_[l])) for l in layers])
@@ -166,7 +168,7 @@ class LayerPredictor:
 
         return bounds
 
-    def calculate_features(self, bbox, auto_exc_cells):
+    def _calculate_features(self, bbox, auto_exc_cells):
         """
         calculates the features used for the HMM
         :param bbox: bbox of column
@@ -193,8 +195,8 @@ class LayerPredictor:
         prev_cutoff_idx = 0
         for curr_y in depths:
             # first index where pt_position[1] is greater than curr_y + bin_width
-            cutoff_idx = Predictor.get_cutoff_idx(auto_exc_cells, curr_y + self.bin_width, prev_cutoff_idx)
-            lower_cutoff_idx = Predictor.get_cutoff_idx(auto_exc_cells, curr_y, prev_cutoff_idx)
+            cutoff_idx = LayerPredictor.get_cutoff_idx(auto_exc_cells, curr_y + self.bin_width, prev_cutoff_idx)
+            lower_cutoff_idx = LayerPredictor.get_cutoff_idx(auto_exc_cells, curr_y, prev_cutoff_idx)
 
             current_exc_cells = auto_exc_cells.iloc[lower_cutoff_idx:cutoff_idx]
 
@@ -214,7 +216,7 @@ class LayerPredictor:
         if self.use_soma_vol_std:
             exc_features_df["soma_vol_std"] = exc_soma_vol_std_by_depth
         for col in exc_features_df.columns:
-            exc_features_df[col] = Predictor.clean_nans(exc_features_df[col], normalize=True)
+            exc_features_df[col] = LayerPredictor.clean_nans(exc_features_df[col], normalize=True)
 
         ### PCA on the features to remove correlations
         if self.num_PCA is not None:
@@ -235,9 +237,10 @@ class LayerPredictor:
                 plt.ylabel(" ".join(list(exc_features_df.columns)))
                 plt.show()
 
-                plt.plot(explained_variance)
+                plt.plot(range(1, len(explained_variance) + 1), explained_variance)
                 plt.xlabel("num principle components")
                 plt.ylabel("explained variance")
+                plt.ylim([0, 1])
                 plt.show()
 
             # Yc is the projection of Xc onto the principal components
@@ -246,11 +249,11 @@ class LayerPredictor:
         varis = exc_features_df.values if self.num_PCA is None else Yc.T
         if self.use_depth:
             # this is here because depth shouldn't go into PCA
-            varis = np.hstack([varis, Predictor.clean_nans(exc_soma_depths, normalize=True).reshape(-1, 1)])
+            varis = np.hstack([varis, LayerPredictor.clean_nans(exc_soma_depths, normalize=True).reshape(-1, 1)])
 
         return bin_centers, varis
 
-    def hmm_fit(self, bin_centers, varis):
+    def _hmm_fit(self, bin_centers, varis):
         """
         fits a hidden markov model to the variables given, which are measured at depths bin_centers
         :param bin_centers: depths of varis in mm
@@ -275,8 +278,12 @@ class LayerPredictor:
         covars = np.ones((model.n_components, nf))
         for i in range(model.n_components):
             idxs = (default_bounds[i] <= bin_centers) & (bin_centers < default_bounds[i + 1])
-            model.means_[i, :] = varis[idxs, :].mean(axis=0)
-            covars[i, :] = varis[idxs, :].var(axis=0) + 1e-10
+            if any(idxs):
+                model.means_[i, :] = varis[idxs, :].mean(axis=0)
+                covars[i, :] = varis[idxs, :].var(axis=0) + 1e-10
+            else:
+                model.means_[i, :] = 0
+                covars[i, :] = 0.1
         model.covars_ = covars
 
         depth_centers = model.means_[:, -1] if self.use_depth else None  # to help reduce major errors, these will be the means for the depth emissions
@@ -305,7 +312,7 @@ class LayerPredictor:
 
         return model
 
-    def hmm_predict(self, model, bin_centers, varis):
+    def _hmm_predict(self, model, bin_centers, varis):
         """
         computes the layer boundaries as predicted by model on observation varis, which were observed at depths bin_centers
         :return: bounds: predicted layer boundaries
@@ -360,7 +367,26 @@ class LayerPredictor:
 
 
 if __name__ == "__main__":
-    p = Predictor(num_PCA=2, use_depth=False, verbose=True)
+    p = LayerPredictor(num_PCA=None, use_depth=False, verbose=True)
+    minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])
 
-    bboxs = [np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])]
-    print(p.predict(bboxs))
+    quadrants = [minnie_col.copy() for i in range(4)]
+
+    midx = (minnie_col[0, 0] + minnie_col[1, 0]) / 2
+    midz = (minnie_col[0, 2] + minnie_col[1, 2]) / 2
+
+    quadrants[0][0, 0] = midx
+    quadrants[0][0, 2] = midz
+
+    quadrants[1][1, 0] = midx
+    quadrants[1][0, 2] = midz
+
+    quadrants[2][1, 0] = midx
+    quadrants[2][1, 2] = midz
+
+    quadrants[3][0, 0] = midx
+    quadrants[3][1, 2] = midz
+
+    print(quadrants)
+
+    print(p.predict(quadrants))
