@@ -37,6 +37,8 @@ class LayerPredictor:
         self.use_soma_vol_std = use_soma_vol_std
         self.num_PCA = num_PCA
         self.verbose = verbose
+        self.default_bounds = np.array(
+            [0.3, 0.400516, 0.555516, 0.700516, 0.830516, 1.010516, 1.1])  # from HMM trained on 2 PCA modes in column
 
     def predict(self, bboxs):
         """
@@ -70,10 +72,10 @@ class LayerPredictor:
 
         if self.verbose:
             print("loading soma features... ", end="")
-        self.soma_features = pd.read_pickle("Minnie_soma_nuc_feature_model_83_1.pkl")  # TODO this isn't available to everyone
+        self.soma_features = pd.read_pickle(
+            "Minnie_soma_nuc_feature_model_83_1.pkl")  # TODO this isn't available to everyone
         if self.verbose:
             print("success.")
-
 
         self.soma_features["seg_id"] = [nuc_to_root.loc[n].pt_root_id for n in self.soma_features.nuc_id]
         self.soma_features.index = self.soma_features.seg_id
@@ -88,6 +90,7 @@ class LayerPredictor:
             if self.verbose:
                 print("\nWORKING ON", bbox)
             results.append(self._predict_col(bbox))
+        plt.show()
         return results
 
     def _predict_col(self, bbox):
@@ -105,84 +108,93 @@ class LayerPredictor:
         for feature in self.features:
             auto_col_cells[feature] = [
                 (self.soma_features.loc[r][feature] if r in soma_features_root_ids and
-                type(self.soma_features.loc[r][feature]) is not pd.Series else np.nan)
+                                                       type(self.soma_features.loc[r][
+                                                                feature]) is not pd.Series else np.nan)
                 for r in auto_col_cells.pt_root_id]
 
         # weird case where someone only wants the std but not the mean of cell size
         if self.use_soma_vol_std and "soma_volume" not in self.features:
             auto_col_cells["soma_volume"] = [
                 (self.soma_features.loc[r]["soma_volume"] if r in soma_features_root_ids and
-                type(self.soma_features.loc[r]["soma_volume"]) is not pd.Series else np.nan)
+                                                             type(self.soma_features.loc[r][
+                                                                      "soma_volume"]) is not pd.Series else np.nan)
                 for r in auto_col_cells.pt_root_id]
 
-        auto_exc_cells = auto_col_cells.query("classification_system == 'aibs_coarse_excitatory'")
-
-        bin_centers, varis = self._calculate_features(bbox, auto_exc_cells)
+        if self.verbose:
+            print("calculating features by depth... ", end="")
+        bin_centers, varis, exc_soma_densities = self._calculate_features(bbox, auto_col_cells)
+        if self.verbose:
+            print("success.")
 
         model = self._hmm_fit(bin_centers, varis)
 
-        bounds, layers, posteriors = self._hmm_predict(model, bin_centers, varis)
+        bounds, hmm_layers, posteriors = self._hmm_predict(model, bin_centers, varis, exc_soma_densities)
 
-        model_means = np.array([model.means_[l] for l in layers])
-        model_stds = np.array([np.diagonal(np.sqrt(model.covars_[l])) for l in layers])
+        model_means = np.array([model.means_[l] for l in hmm_layers])
+        model_stds = np.array([np.diagonal(np.sqrt(model.covars_[l])) for l in hmm_layers])
+
+        # Plot model results!
+
+        colors = get_cmap("tab20").colors[::2] + get_cmap("tab20b").colors[::2]
+
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4), dpi=130)
+        ax2 = ax.twinx()
+
+        for i in range(varis.shape[1]):
+            c = colors[i % len(colors)]
+            ax2.plot(bin_centers, varis[:, i], color=c, label=f"variable {i}")
+            ax2.plot(bin_centers, model_means[:, i], linestyle="-.", color=c)
+            ax2.fill_between(bin_centers, model_means[:, i] - model_stds[:, i],
+                             model_means[:, i] + model_stds[:, i],
+                             edgecolor="none", facecolor=c, alpha=0.2)
+
+        # for i, f in enumerate(features):
+        #     c = colors[i % len(colors)]
+        #     ax2.plot(bin_centers, exc_soma_features_by_depth[f] / np.nanmax(exc_soma_features_by_depth[f]), linestyle="-", color=c, label="exc " + f)
+        #     ax2.plot(bin_centers, model_means[:, i + 2], linestyle="-.", color=c, label="exc "+ f + " model mean")
+        #     ax2.fill_between(bin_centers, model_means[:, i+2] - model_stds[:, i+2], model_means[:, i+2] + model_stds[:, i+2], edgecolor="none", facecolor=c, alpha=0.2)
+        #     ax2.plot(bin_centers, normalized_smooth_exc_features[f], linestyle=":", label="exc fit " + f)
+
+        labels = np.array([107000, 147000, 184000, 224000, 265000]) * self.resolution[
+            1] / 1_000_000  # manual labels minnie65 col
+        ax.axvline(labels[0], linestyle="--", color="k", label="manual")
+        for lab in labels[1:]:
+            ax.axvline(lab, linestyle="--", color="k")
+        ax.axvline(bounds[0], linestyle="--", color="blue", label="automatic")
+        for bound in bounds[1:]:
+            ax.axvline(bound, linestyle="--", color="blue")
+        ax.plot(bin_centers, posteriors)
+        ax.legend(bbox_to_anchor=[1.1, 1])
+        ax2.legend(bbox_to_anchor=[1.1, 0.6])
+        ax.set_xlabel("depth ($mm$)")
+        ax.set_ylim([0, 3])
+        # ax.set_ylabel("soma density (per $mm^{3}$)")
+        # ax2.set_ylabel("synapse density (per $mm^3$)")
 
         if self.verbose:
-            # Plot model results!
-
-            colors = get_cmap("tab20").colors[::2] + get_cmap("tab20b").colors[::2]
-
-            fig, ax = plt.subplots(1, 1, figsize=(6, 4), dpi=130)
-            ax2 = ax.twinx()
-
-            for i in range(varis.shape[1]):
-                c = colors[i % len(colors)]
-                ax2.plot(bin_centers, varis[:, i], color=c, label=f"variable {i}")
-                ax2.plot(bin_centers, model_means[:, i], linestyle="-.", color=c)
-                ax2.fill_between(bin_centers, model_means[:, i] - model_stds[:, i],
-                                 model_means[:, i] + model_stds[:, i],
-                                 edgecolor="none", facecolor=c, alpha=0.2)
-
-            # for i, f in enumerate(features):
-            #     c = colors[i % len(colors)]
-            #     ax2.plot(bin_centers, exc_soma_features_by_depth[f] / np.nanmax(exc_soma_features_by_depth[f]), linestyle="-", color=c, label="exc " + f)
-            #     ax2.plot(bin_centers, model_means[:, i + 2], linestyle="-.", color=c, label="exc "+ f + " model mean")
-            #     ax2.fill_between(bin_centers, model_means[:, i+2] - model_stds[:, i+2], model_means[:, i+2] + model_stds[:, i+2], edgecolor="none", facecolor=c, alpha=0.2)
-            #     ax2.plot(bin_centers, normalized_smooth_exc_features[f], linestyle=":", label="exc fit " + f)
-
-            labels = np.array([107000, 147000, 184000, 224000, 265000]) * self.resolution[
-                1] / 1_000_000  # manual labels minnie65 col
-            ax.axvline(labels[0], linestyle="--", color="k", label="manual")
-            for lab in labels[1:]:
-                ax.axvline(lab, linestyle="--", color="k")
-            ax.axvline(bounds[0], linestyle="--", color="blue", label="automatic")
-            for bound in bounds[1:]:
-                ax.axvline(bound, linestyle="--", color="blue")
-            ax.plot(bin_centers, posteriors)
-            ax.legend(bbox_to_anchor=[1.1, 1])
-            ax2.legend(bbox_to_anchor=[1.1, 0.6])
-            ax.set_xlabel("depth ($mm$)")
-            ax.set_ylim([0, 3])
-            # ax.set_ylabel("soma density (per $mm^{3}$)")
-            # ax2.set_ylabel("synapse density (per $mm^3$)")
-            plt.show()
-            fig.savefig(f"{bbox[0, 0]}x.svg")
+            plt.draw()
+        fig.savefig(f"changingDefault_useDepth={self.use_depth}_{bbox[0, 0]}x.svg")
 
         return bounds
 
-    def _calculate_features(self, bbox, auto_exc_cells):
+    def _calculate_features(self, bbox, auto_col_cells):
         """
         calculates the features used for the HMM
         :param bbox: bbox of column
-        :param auto_exc_cells: df of excitatory cells in column with features attached
+        :param auto_exc_cells: df of cells in column with features attached
         :return bin_centers: the 1D array of mm depths at which the features were calculated
-                varis: the 2D array of features to be used for the HMM
+                varis: the 2D array of features to be used for the HMM, normalized and cleaned of nans
+                exc_soma_densities: density of excitatory somas in #/mm^3
         """
+        auto_exc_cells = auto_col_cells.query("classification_system == 'aibs_coarse_excitatory'")
+
         # cross sectional area to be layered, in mm^2
-        xarea = self.resolution[0] * self.resolution[2] * (bbox[1][0] - bbox[0][0]) * (bbox[1][2] - bbox[0][2]) / 1_000_000 ** 2
+        xarea = self.resolution[0] * self.resolution[2] * (bbox[1][0] - bbox[0][0]) * (
+                    bbox[1][2] - bbox[0][2]) / 1_000_000. ** 2
 
         # min is pia border (with L1) and max is white matter border (with L6)
-        min_y = np.min(auto_exc_cells.mm_depth.values)
-        max_y = np.max(auto_exc_cells.mm_depth.values)
+        min_y = np.min(auto_col_cells.mm_depth.values)
+        max_y = np.max(auto_col_cells.mm_depth.values)
 
         auto_exc_cells = auto_exc_cells.sort_values(axis="index", by="mm_depth")
 
@@ -236,13 +248,13 @@ class LayerPredictor:
                 plt.colorbar()
                 plt.title("covariance matrix")
                 plt.ylabel(" ".join(list(exc_features_df.columns)))
-                plt.show()
+                plt.draw()
 
                 plt.plot(range(1, len(explained_variance) + 1), explained_variance)
                 plt.xlabel("num principle components")
                 plt.ylabel("explained variance")
                 plt.ylim([0, 1])
-                plt.show()
+                plt.draw()
 
             # Yc is the projection of Xc onto the principal components
             Yc = V[:, :self.num_PCA].T @ Xc
@@ -252,7 +264,7 @@ class LayerPredictor:
             # this is here because depth shouldn't go into PCA
             varis = np.hstack([varis, LayerPredictor.clean_nans(exc_soma_depths, normalize=True).reshape(-1, 1)])
 
-        return bin_centers, varis
+        return bin_centers, varis, exc_soma_densities
 
     def _hmm_fit(self, bin_centers, varis):
         """
@@ -273,12 +285,10 @@ class LayerPredictor:
 
         # initialize means and variances
         nf = varis.shape[1]
-        default_bounds = np.array(
-            [0.3, 0.400516, 0.555516, 0.700516, 0.830516, 1.010516, 1.1])  # from HMM trained on 2 PCA modes in column
         model.means_ = np.zeros((model.n_components, nf))
         covars = np.ones((model.n_components, nf))
         for i in range(model.n_components):
-            idxs = (default_bounds[i] <= bin_centers) & (bin_centers < default_bounds[i + 1])
+            idxs = (self.default_bounds[i] <= bin_centers) & (bin_centers < self.default_bounds[i + 1])
             if any(idxs):
                 model.means_[i, :] = varis[idxs, :].mean(axis=0)
                 covars[i, :] = varis[idxs, :].var(axis=0) + 1e-10
@@ -287,7 +297,8 @@ class LayerPredictor:
                 covars[i, :] = 0.1
         model.covars_ = covars
 
-        depth_centers = model.means_[:, -1] if self.use_depth else None  # to help reduce major errors, these will be the means for the depth emissions
+        depth_centers = model.means_[:,
+                        -1] if self.use_depth else None  # to help reduce major errors, these will be the means for the depth emissions
 
         # the package has it's own convergence monitor, but I want fine control over it so I'm doing it manually
         prev_score = -1
@@ -299,41 +310,56 @@ class LayerPredictor:
             model.fit(varis)
             prev_score = score
             score = model.score(varis)
-            print(score)
             i += 1
-            # TODO: I should instead not use the HMM for this, just a threshold for the outer borders
             if self.use_depth:
                 # each iteration re-fix the "target" mean depth to the center of each default layer
                 # so the model can't be terribly wrong
                 model.means_[:, -1] = depth_centers
-            print("after correction:", model.score(varis))
+            if self.verbose:
+                print("score:", model.score(varis))
 
         if abs(score - prev_score) > tol:
             raise ValueError("Did not converge")
 
         return model
 
-    def _hmm_predict(self, model, bin_centers, varis):
+    def _hmm_predict(self, model, bin_centers, varis, exc_soma_densities):
         """
         computes the layer boundaries as predicted by model on observation varis, which were observed at depths bin_centers
+        :param bin_centers: depths of varis in mm
+        :param varis: np.array of shape (len(bin_centers), num_features), normalized and free of nans
+        :param exc_soma_densities: np.array of shape (len(bin_centers),) that contains the density of exc somas in mm^-3
         :return: bounds: predicted layer boundaries
-                 layers: prediction of which layer each index participates in (its hidden state)
+                 hmm_layers: hmm prediction of which layer each index participates in (its hidden state)
                  posteriors: how confident the hmm is that each depth belongs to each state
         """
-        layers = model.predict(varis).tolist()
+        hmm_layers = model.predict(varis).tolist()
 
         bounds = []
-        for i in range(1, model.n_components):
-            idx = layers.index(i)
+        for i in range(2, model.n_components - 1):
+            idx = hmm_layers.index(i)
             bounds.append((bin_centers[idx] + bin_centers[idx - 1]) / 2)
+
+        l1_2_thresh = 120_000
+        l1_2_idx = np.nonzero(exc_soma_densities > l1_2_thresh)[0][0]
+        l1_2_bound = bin_centers[l1_2_idx - 1] + (bin_centers[l1_2_idx] - bin_centers[l1_2_idx - 1]) \
+                    * (l1_2_thresh - exc_soma_densities[l1_2_idx - 1]) / (
+                                exc_soma_densities[l1_2_idx] - exc_soma_densities[l1_2_idx - 1])
+        l6_wm_thresh = 50_000
+        l6_wm_idx = np.nonzero(exc_soma_densities > l6_wm_thresh)[0][-1]
+        l6_wm_bound = bin_centers[l6_wm_idx] + (bin_centers[l6_wm_idx + 1] - bin_centers[l6_wm_idx]) \
+                    * (l6_wm_thresh - exc_soma_densities[l6_wm_idx]) / (
+                                exc_soma_densities[l6_wm_idx + 1] - exc_soma_densities[l6_wm_idx])
+        bounds = [l1_2_bound] + bounds + [l6_wm_bound]
         bounds = np.array(bounds)
+        self.default_bounds[
+        1:-1] = bounds  # TODO: make sure I traverse the dataset in a snake so that default_bounds always reflects the bounds of a neighbor
 
         posteriors = model.predict_proba(varis)
         if self.verbose:
             print("bounds:", bounds)
 
-        return bounds, layers, posteriors
-
+        return bounds, hmm_layers, posteriors
 
     @staticmethod
     def in_bbox(p, bbox):
@@ -368,7 +394,7 @@ class LayerPredictor:
 
 
 if __name__ == "__main__":
-    p = LayerPredictor(num_PCA=None, use_depth=False, verbose=True)
+    p = LayerPredictor(num_PCA=None, use_depth=True, use_soma_vol_std=True, verbose=True)
     minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])
     bboxs = [minnie_col + i * np.array([50_000, 0, 0]) for i in range(12)]
 
@@ -389,4 +415,6 @@ if __name__ == "__main__":
     # quadrants[3][0, 0] = midx
     # quadrants[3][1, 2] = midz
 
-    print(p.predict(bboxs))
+    bounds = p.predict(bboxs)
+    bounds = [b.tolist() for b in bounds]
+    print(bounds)
