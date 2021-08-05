@@ -165,6 +165,7 @@ class LayerPredictor:
             # ax.set_ylabel("soma density (per $mm^{3}$)")
             # ax2.set_ylabel("synapse density (per $mm^3$)")
             plt.show()
+            fig.savefig(f"{bbox[0, 0]}x.svg")
 
         return bounds
 
@@ -369,24 +370,23 @@ class LayerPredictor:
 if __name__ == "__main__":
     p = LayerPredictor(num_PCA=None, use_depth=False, verbose=True)
     minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])
+    bboxs = [minnie_col + i * np.array([50_000, 0, 0]) for i in range(12)]
 
-    quadrants = [minnie_col.copy() for i in range(4)]
+    # quadrants = [minnie_col.copy() for i in range(4)]
+    #
+    # midx = (minnie_col[0, 0] + minnie_col[1, 0]) / 2
+    # midz = (minnie_col[0, 2] + minnie_col[1, 2]) / 2
+    #
+    # quadrants[0][0, 0] = midx
+    # quadrants[0][0, 2] = midz
+    #
+    # quadrants[1][1, 0] = midx
+    # quadrants[1][0, 2] = midz
+    #
+    # quadrants[2][1, 0] = midx
+    # quadrants[2][1, 2] = midz
+    #
+    # quadrants[3][0, 0] = midx
+    # quadrants[3][1, 2] = midz
 
-    midx = (minnie_col[0, 0] + minnie_col[1, 0]) / 2
-    midz = (minnie_col[0, 2] + minnie_col[1, 2]) / 2
-
-    quadrants[0][0, 0] = midx
-    quadrants[0][0, 2] = midz
-
-    quadrants[1][1, 0] = midx
-    quadrants[1][0, 2] = midz
-
-    quadrants[2][1, 0] = midx
-    quadrants[2][1, 2] = midz
-
-    quadrants[3][0, 0] = midx
-    quadrants[3][1, 2] = midz
-
-    print(quadrants)
-
-    print(p.predict(quadrants))
+    print(p.predict(bboxs))
