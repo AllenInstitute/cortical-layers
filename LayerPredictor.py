@@ -395,8 +395,8 @@ class LayerPredictor:
 
 if __name__ == "__main__":
     p = LayerPredictor(num_PCA=None, use_depth=True, use_soma_vol_std=True, verbose=True)
-    minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])
-    bboxs = [minnie_col + i * np.array([50_000, 0, 0]) for i in range(12)]
+    minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])  # vx
+    bboxs = [minnie_col + i * np.array([25_000, 0, 0]) for i in range(27)]
 
     # quadrants = [minnie_col.copy() for i in range(4)]
     #
