@@ -16,7 +16,8 @@ class LayerPredictor:
                  use_depth=True,
                  use_soma_vol_std=True,
                  num_PCA=None,
-                 verbose=False):
+                 verbose=False,
+                 **kwargs):
         """
         :param bin_width (float in mm) How wide a bin should be used for calculating information by depth
         :param step_size (float in mm) How large of steps should be taken in the depth direction. Recommend <= bin_width
@@ -28,6 +29,8 @@ class LayerPredictor:
         :param num_PCA (None or int)  indicates how many PCA modes should be used. Default: None, which indicates the raw features should
                be used without performing PCA
         :param verbose dictates whether printing and plotting occurs
+        :param default_bounds (np.array of shape (7,)): the default boundaries to use to initialize the HMM. This value is updated every time
+               predict_col is called
         """
         self.bin_width = bin_width
         self.step_size = step_size
@@ -37,7 +40,7 @@ class LayerPredictor:
         self.use_soma_vol_std = use_soma_vol_std
         self.num_PCA = num_PCA
         self.verbose = verbose
-        self.default_bounds = np.array(
+        self.default_bounds = kwargs["default_bounds"] if "default_bounds" in kwargs else np.array(
             [0.3, 0.400516, 0.555516, 0.700516, 0.830516, 1.010516, 1.1])  # from HMM trained on 2 PCA modes in column
 
     def predict(self, bboxs):
@@ -54,7 +57,7 @@ class LayerPredictor:
         # Gather data
         if self.verbose:
             print("connecting to server... ", end="")
-        datastack_name = "minnie65_phase3_v1"
+        datastack_name = "minnie65_public_v117"
         client = CAVEclient(datastack_name)
         if self.verbose:
             print("success.")
@@ -85,7 +88,9 @@ class LayerPredictor:
         # avg sdf is a list of the 'diameters' of processes (e.g. dendrites) that leave each cell body
 
         results = []
-        for b in bboxs:
+        for i, b in enumerate(bboxs):
+            if i == 6:
+                print("DEBUG")
             bbox = b / self.resolution
             if self.verbose:
                 print("\nWORKING ON", bbox)
@@ -126,7 +131,7 @@ class LayerPredictor:
         if self.verbose:
             print("success.")
 
-        model = self._hmm_fit(bin_centers, varis)
+            model = self._hmm_fit(bin_centers, varis)
 
         bounds, hmm_layers, posteriors = self._hmm_predict(model, bin_centers, varis, exc_soma_densities)
 
@@ -215,7 +220,8 @@ class LayerPredictor:
 
             for f in self.features:
                 exc_soma_features_by_depth[f].append(current_exc_cells[f].mean())
-            exc_soma_vol_std_by_depth.append(current_exc_cells["soma_volume"].std())
+            if self.use_soma_vol_std:
+                exc_soma_vol_std_by_depth.append(current_exc_cells["soma_volume"].std())
             exc_soma_depths.append(current_exc_cells["mm_depth"].mean())
 
             exc_soma_densities.append(len(current_exc_cells))
@@ -394,27 +400,33 @@ class LayerPredictor:
 
 
 if __name__ == "__main__":
-    p = LayerPredictor(num_PCA=None, use_depth=True, use_soma_vol_std=True, verbose=True)
-    minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])  # vx
-    bboxs = [minnie_col + i * np.array([25_000, 0, 0]) for i in range(27)]
+    minnie_col = np.array([[672444., 200000., 805320.], [772444., 1294000., 905320.]])  # nm
+    resolution = np.array([4., 4., 40.])
 
-    # quadrants = [minnie_col.copy() for i in range(4)]
-    #
-    # midx = (minnie_col[0, 0] + minnie_col[1, 0]) / 2
-    # midz = (minnie_col[0, 2] + minnie_col[1, 2]) / 2
-    #
-    # quadrants[0][0, 0] = midx
-    # quadrants[0][0, 2] = midz
-    #
-    # quadrants[1][1, 0] = midx
-    # quadrants[1][0, 2] = midz
-    #
-    # quadrants[2][1, 0] = midx
-    # quadrants[2][1, 2] = midz
-    #
-    # quadrants[3][0, 0] = midx
-    # quadrants[3][1, 2] = midz
+    seg_low_um = np.array([130_000, 50_000,
+                           15_000]) * resolution / 1_000  # conservative bbox only containing well-segmented areas
+    seg_up_um = np.array([355_000, 323_500, 27_500]) * resolution / 1_000
+    seg_size_um = seg_up_um - seg_low_um
+    seg_bounds_vx = np.array([seg_low_um, seg_up_um]) * 1_000 / resolution
 
-    bounds = p.predict(bboxs)
+    col_size = np.array([100, 100])  # x and z dimensions of column
+    ngridpts = ((seg_size_um[[0, 2]] - col_size) // 50).astype(int)  # number of grid points in x and z directions
+    col_center_xs = np.linspace(seg_low_um[0] + col_size[0] // 2, seg_up_um[0] - col_size[0] // 2, ngridpts[0])
+    col_center_zs = np.linspace(seg_low_um[2] + col_size[1] // 2, seg_up_um[2] - col_size[1] // 2, ngridpts[1])
+
+    cols_nm = []
+    offx = col_size[0] // 2
+    offz = col_size[1] // 2
+    for i, x in enumerate(col_center_xs):
+        for z in col_center_zs[::(-1) ** i]:
+            col_low = [x - offx, seg_low_um[1], z - offz]
+            col_up = [x + offx, seg_up_um[1], z + offz]
+            cols_nm.append(np.array([col_low, col_up]) * 1_000)
+
+    p = LayerPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True, resolution=resolution, verbose=True)
+
+    # bboxs = [minnie_col + i * np.array([25_000, 0, 0]) for i in range(27)]  # move along x
+    # bounds = p.predict(bboxs)
+    bounds = p.predict(cols_nm)
     bounds = [b.tolist() for b in bounds]
     print(bounds)
