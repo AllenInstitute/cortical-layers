@@ -31,6 +31,7 @@ class LayerPredictor:
         :param verbose dictates whether printing and plotting occurs
         :param default_bounds (np.array of shape (7,)): the default boundaries to use to initialize the HMM. This value is updated every time
                predict_col is called
+        :param: name: name="features", the name of this layer predictor to use for file naming
         """
         self.bin_width = bin_width
         self.step_size = step_size
@@ -42,6 +43,7 @@ class LayerPredictor:
         self.verbose = verbose
         self.default_bounds = kwargs["default_bounds"] if "default_bounds" in kwargs else np.array(
             [0.3, 0.400516, 0.555516, 0.700516, 0.830516, 1.010516, 1.1])  # from HMM trained on 2 PCA modes in column
+        self.name = kwargs["name"] if "name" in kwargs else "features"
 
     def predict(self, bboxs):
         """
@@ -89,19 +91,19 @@ class LayerPredictor:
 
         results = []
         for i, b in enumerate(bboxs):
-            if i == 6:
-                print("DEBUG")
             bbox = b / self.resolution
             if self.verbose:
                 print("\nWORKING ON", bbox)
-            results.append(self._predict_col(bbox))
+            results.append(self._predict_col(bbox, idx=i))
         plt.show()
         return results
 
-    def _predict_col(self, bbox):
+    def _predict_col(self, bbox, idx=None):
         """
         makes layer boundary predictions for the particular column provided by bbox
         :param bbox: bounding box of column
+        :param idx: the index of bbox within the bboxs parameter passed into predict()
+        :param prefix: the prefix of the filename to use
         :return: bounds: the predicted layer bounds
         """
         soma_features_root_ids = set(self.soma_features.seg_id)
@@ -178,7 +180,7 @@ class LayerPredictor:
 
         if self.verbose:
             plt.draw()
-        fig.savefig(f"changingDefault_useDepth={self.use_depth}_{bbox[0, 0]}x.svg")
+        fig.savefig(f"{self.name}_{idx}.png")
 
         return bounds
 
@@ -410,7 +412,7 @@ if __name__ == "__main__":
     seg_bounds_vx = np.array([seg_low_um, seg_up_um]) * 1_000 / resolution
 
     col_size = np.array([100, 100])  # x and z dimensions of column
-    ngridpts = ((seg_size_um[[0, 2]] - col_size) // 50).astype(int)  # number of grid points in x and z directions
+    ngridpts = ((seg_size_um[[0, 2]] - col_size) // 25).astype(int)  # number of grid points in x and z directions
     col_center_xs = np.linspace(seg_low_um[0] + col_size[0] // 2, seg_up_um[0] - col_size[0] // 2, ngridpts[0])
     col_center_zs = np.linspace(seg_low_um[2] + col_size[1] // 2, seg_up_um[2] - col_size[1] // 2, ngridpts[1])
 
@@ -423,7 +425,7 @@ if __name__ == "__main__":
             col_up = [x + offx, seg_up_um[1], z + offz]
             cols_nm.append(np.array([col_low, col_up]) * 1_000)
 
-    p = LayerPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True, resolution=resolution, verbose=True)
+    p = LayerPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True, resolution=resolution, verbose=True, name="25um_step")
 
     # bboxs = [minnie_col + i * np.array([25_000, 0, 0]) for i in range(27)]  # move along x
     # bounds = p.predict(bboxs)

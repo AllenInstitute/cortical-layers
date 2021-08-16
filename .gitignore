@@ -2,6 +2,9 @@
 *.svg
 *.png
 *.xlsx
+*.zip
+*.txt
+layermeshes/
 
 .idea
 
