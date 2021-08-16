@@ -4,6 +4,7 @@
 *.xlsx
 *.zip
 *.txt
+*.json
 layermeshes/
 
 .idea
