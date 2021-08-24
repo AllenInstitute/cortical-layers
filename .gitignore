@@ -1,4 +1,5 @@
 *.pkl
+*.npy
 *.svg
 *.png
 *.xlsx

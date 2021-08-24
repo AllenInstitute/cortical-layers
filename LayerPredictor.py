@@ -2,12 +2,77 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.cm import get_cmap
-
+import os
+import pickle
+from scipy.signal import convolve2d
+from scipy import interpolate
+import warnings
 from hmmlearn import hmm
 from caveclient import CAVEclient
 
 
-class LayerPredictor:
+class LayerPrediction:
+    """
+    stores the prediction of layer boundaries, including the columns for which predictions were made,
+    the values of the prediction, and the shape of the grid over which the predictions were made
+    """
+
+    def __init__(self, columns_nm, num_gridpts, boundaries, col_center_xs, col_center_zs,
+                 overall_bbox, name="layer_prediction", cache_dir="."):
+        self.cols_nm = columns_nm
+        self.ngridpts = num_gridpts
+        self.bounds = boundaries
+        self.col_center_xs, self.col_center_zs = col_center_xs, col_center_zs
+        self.overall_bbox = overall_bbox
+        self.name = name
+        self.cache_dir = cache_dir
+
+    def save_pickle(self):
+        with open(os.path.join(self.cache_dir, f"{self.name}.pkl"), "wb") as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load_pickle(dir):
+        with open(dir, "rb") as f:
+            o = pickle.load(f)
+        return o
+
+    @staticmethod
+    def to_spatial_array(snaking_arr, ngridpts):
+        """
+        Convert a snaking array to a spatial array, given the size of the grid through which it snakes. Useful for
+        taking the results of get_snaking_cols() or predict() to a spatially arranged array.
+        :param snaking_arr: (np.array of shape (ngridpts[0] * ngridpts[1], ...)), in which the first dimension
+                            should be reshaped into a 2D spatial array
+        :param ngridpts: (list-like of length 2) representing the number of grid points in the x and z directions
+        :return: np.array of shape (ngridpts[0], ngridpts[1], *snaking_arr.shape[1:])
+        """
+        spatial_array = snaking_arr.reshape((ngridpts[0], ngridpts[1], *snaking_arr.shape[1:])).copy()
+        for i in range(1, spatial_array.shape[0], 2):  # reverse every other x slice
+            spatial_array[i, :, ...] = spatial_array[i, ::-1, ...]
+        return spatial_array
+
+    @staticmethod
+    def to_snaking_array(spatial_arr):
+        """
+        convert spatial array to snaking array
+        :param spatial_arr:
+        :return: snaking array (np.array of shape (spatial_arr.shape[0] * spatial_arr.shape[1], ...)),
+                in which the first dimension has been reshaped from the given a 2D spatial array
+        """
+        smoothed_bounds = []
+        for i in range(spatial_arr.shape[0]):
+            if i % 2 == 0:
+                smoothed_bounds.extend(spatial_arr[i, :, ...].tolist())
+            else:
+                smoothed_bounds.extend(spatial_arr[i, ::-1, ...].tolist())
+        return np.array(smoothed_bounds)
+
+
+class BoundaryPredictor:
+    """
+    finds the borders between layers for each column in a list of columns to be predicted
+    """
 
     def __init__(self, bin_width=0.05,
                  step_size=0.005,
@@ -35,15 +100,16 @@ class LayerPredictor:
                    'cell_type_pred_num', 'cell_type_pred', 'umapx', 'umapy', 'visible',
                    'outline_color', 'outline_width', 'max_sdf'}
         :param use_depth determines whether depth should be a features
-        :param use_soma_vol_std determines whether the standard deviation of soma volume at each depth should additionally
+        :param use_soma_vol_std determines whether the standard deviation of soma volume at each depth should also
                be used as a feature (all the other features take the mean only)
-        :param num_PCA (None or int)  indicates how many PCA modes should be used. Default: None, which indicates the raw features should
-               be used without performing PCA
+        :param num_PCA (None or int)  indicates how many PCA modes should be used. Default: None, which indicates the
+            raw features should be used without performing PCA
         :param save_figs=False dictates whether plots should be saved to disk
         :param verbose=False dictates whether printing and plotting occurs
-        :param default_bounds (np.array of shape (7,)): the default boundaries to use to initialize the HMM. This value is updated every time
-               predict_col is called
-        :param: name: name="features", the name of this layer predictor to use for file naming
+        :param default_bounds (np.array of shape (7,)): the default boundaries to use to initialize the HMM.
+               This value is updated every time predict_col is called
+        :param: cache_dir: default: ".", the directory where to store resulting plots and predictions
+        :param: name: default: "layers", the name of this layer predictor to use for file naming
         """
         self.bin_width = bin_width
         self.step_size = step_size
@@ -56,14 +122,15 @@ class LayerPredictor:
         self.verbose = verbose
         self.default_bounds = kwargs["default_bounds"] if "default_bounds" in kwargs else np.array(
             [0.3, 0.400516, 0.555516, 0.700516, 0.830516, 1.010516, 1.1])  # from HMM trained on 2 PCA modes in column
-        self.name = kwargs["name"] if "name" in kwargs else "features"
+        self.name = kwargs["name"] if "name" in kwargs else "layers"
+        self.cache_dir = kwargs["cache_dir"] if "cache_dir" in kwargs else "."
         self.column_labels = None  # list of the column labels of varis
 
     def _init_data(self):
         # Gather data
         if self.verbose:
             print("connecting to server... ", end="")
-        datastack_name = "minnie65_public_v117"
+        datastack_name = "minnie65_public_v117"  # TODO the only one supported because others don't have a soma table
         client = CAVEclient(datastack_name)
         if self.verbose:
             print("success.")
@@ -93,24 +160,29 @@ class LayerPredictor:
         # soma area and nucleus area closely track their respective volumes
         # avg sdf is a list of the 'diameters' of processes (e.g. dendrites) that leave each cell body
 
-    def predict_with_sensitivity(self, bboxs, ntrials=6, noise_scale=0.02):
+    def predict_with_sensitivity(self, overall_bbox, col_size=(100., 100.), ngridpts=(32, 16), ntrials=6, noise_scale=0.02):
         """
         Calculates the requested features at each depth and uses them to predict the boundaries between cortical layers
-        for the provided regions. It runs ntrials trials of each boundary with randomly perturbed initial conditions
+        for the provided region, at a x,z resolution defined by col_size and step_size.
+        It runs ntrials trials of each boundary with randomly perturbed initial conditions
         and returns the std of the resulting bounds
-        :param bboxs (list of 2x3 np.arrays of floats) the nm coordinates of the minimum corner and maximum corner of
-                the region of interest. Recommend a region 100_000 nm x full depth x 100_000 nm.
-                A separate analysis will be performed on each bbox, but they are initialized using the most recently
-                produced bounds, so adjacent bboxs in the list should be spatially adjacent. Recommend snaking back and
-                forth through 2D dataset.
+        :param overall_bbox (2x3 np.array of floats) the micron coordinates of the minimum corner and maximum corner of
+                the region of interest, which will be broken into many smaller columns of size col_size and predicted
+        :param col_size: (tuple of float) size, in microns, of the x and z dimensions of the columns. 100x100 columns
+               provide sufficient information to make reasonably reliable HMMs
+        :param ngrdipts: (tuple of int) the x and z dimensions of the grid of cortical columns.
+                ngridpts[0] * ngridpts[1] columns will be used
         :param ntrials=10 (int) number of trials to use for sensitivity analysis
         :param noise_scale=0.02 (float) the std in mm of random normal noise to use for sensitivity analysis
-        :return np.array of shape (len(bboxs), 5, ntrials): the respective layer boundaries [L1/L23, L23/L4, L4/L5, L5/L6, L6/WM] for each
-                bbox in bboxs, and where the innermost list contains the results of the `ntrials` trials
+        :return LayerPrediction object, with bounds=np.array of shape (len(bboxs), 5, ntrials): the respective layer
+            boundaries [L1/L23, L23/L4, L4/L5, L5/L6, L6/WM] for each bbox in bboxs, and where the innermost list contains the results of the `ntrials` trials
         """
         self._init_data()
+        bboxs, col_center_xs, col_center_zs = BoundaryPredictor.get_snaking_cols(overall_bbox, col_size=col_size, ngridpts=ngridpts)
 
         results = np.empty((len(bboxs), 5, ntrials))
+        pred = LayerPrediction(bboxs, ngridpts, results, col_center_xs, col_center_zs, overall_bbox, cache_dir=self.cache_dir, name=self.name + "_sensitivity_prediction")
+
         for i, b in enumerate(bboxs):
             bbox = b / self.resolution
             if self.verbose:
@@ -125,50 +197,53 @@ class LayerPredictor:
                 results[i, :, tr] = self._predict_col(bbox, idx=i * ntrials + tr)
             self.default_bounds[1:-1] = results[i, :, :].mean(axis=1)
             if i % 10 == 9:
-                np.save(self.name + "_bounds", results)
+                pred.save_pickle()
                 plt.close("all")  # free up RAM
-        np.save(self.name + "_bounds", results)
+        pred.save_pickle()
         plt.close("all")  # free up RAM
-        return results
+        return pred
 
-    def predict(self, bboxs):
+    def predict(self, overall_bbox, col_size=(100., 100.), ngridpts=(32, 16)):
         """
         Calculates the requested features at each depth and uses them to predict the boundaries between cortical layers
-        for the provided regions
-        :param bboxs (list of 2x3 np.arrays of floats) the nm coordinates of the minimum corner and maximum corner of
-                the region of interest. Recommend a region 100_000 nm x full depth x 100_000 nm.
-                A separate analysis will be performed on each bbox, but they are initialized using the most recently
-                produced bounds, so adjacent bboxs in the list should be spatially adjacent. Recommend snaking back and
-                forth through 2D dataset.
+        for the provided region, at a x,z resolution defined by col_size and step_size
+        :param overall_bbox (2x3 np.array of floats) the micrometer coordinates of the minimum corner and maximum corner of
+                the region of interest, which will be broken into many smaller columns of size col_size and predicted
+        :param col_size: (tuple of float) size, in microns, of the x and z dimensions of the columns. 100x100 columns
+            provide sufficient information to make reasonably reliable HMMs
+        :param ngrdipts: (tuple of int) the x and z dimensions of the grid of cortical columns.
+                ngridpts[0] * ngridpts[1] columns will be used
         :return np.array of shape (len(bboxs), 5): the respective layer boundaries [L1/L23, L23/L4, L4/L5, L5/L6, L6/WM] for each bbox in bboxs
         """
         self._init_data()
+        bboxs, col_center_xs, col_center_zs = BoundaryPredictor.get_snaking_cols(overall_bbox, col_size=col_size, ngridpts=ngridpts)
 
-        results = []
+        results = np.empty((len(bboxs), 5))
+        pred = LayerPrediction(bboxs, ngridpts, results, col_center_xs, col_center_zs, overall_bbox, cache_dir=self.cache_dir, name=self.name + "_prediction")
+
         for i, b in enumerate(bboxs):
             bbox = b / self.resolution
             if self.verbose:
-                print("\nWORKING ON", bbox)
-            results.append(self._predict_col(bbox, idx=i))
+                print("\nWORKING ON", i, bbox)
+            results[i, :] = self._predict_col(bbox, idx=i)
             if i % 10 == 9:
-                np.save(self.name + "_bounds", results)
+                pred.save_pickle()
                 plt.close("all")  # free up RAM
-        np.save(self.name + "_bounds", results)
+        pred.save_pickle()
         plt.close("all")  # free up RAM
         plt.show()
-        return np.array(results)
+        return pred
 
     def _predict_col(self, bbox, idx=None):
         """
         makes layer boundary predictions for the particular column provided by bbox
         :param bbox: bounding box of column
         :param idx: the index of bbox within the bboxs parameter passed into predict()
-        :param prefix: the prefix of the filename to use
         :return: bounds: the predicted layer bounds
         """
         soma_features_root_ids = set(self.soma_features.seg_id)
 
-        auto_col_cells = self.auto_cells[self.auto_cells.pt_position.apply(LayerPredictor.in_bbox, args=[bbox])].copy()
+        auto_col_cells = self.auto_cells[self.auto_cells.pt_position.apply(BoundaryPredictor.in_bbox, args=[bbox])].copy()
         auto_col_cells["mm_depth"] = [auto_col_cells.pt_position.iloc[i][1] * self.resolution[1] / 1_000_000 for i in
                                       range(len(auto_col_cells))]
         # add soma features columns to auto_col_cells
@@ -220,7 +295,7 @@ class LayerPredictor:
             if self.verbose:
                 plt.draw()
             if self.save_figs:
-                fig.savefig(f"{self.name}_{idx}.png")
+                fig.savefig(os.path.join(self.cache_dir, f"{self.name}_{idx}.png"))
 
         return bounds
 
@@ -255,8 +330,8 @@ class LayerPredictor:
         prev_cutoff_idx = 0
         for curr_y in depths:
             # first index where pt_position[1] is greater than curr_y + bin_width
-            cutoff_idx = LayerPredictor.get_cutoff_idx(auto_exc_cells, curr_y + self.bin_width, prev_cutoff_idx)
-            lower_cutoff_idx = LayerPredictor.get_cutoff_idx(auto_exc_cells, curr_y, prev_cutoff_idx)
+            cutoff_idx = BoundaryPredictor.get_cutoff_idx(auto_exc_cells, curr_y + self.bin_width, prev_cutoff_idx)
+            lower_cutoff_idx = BoundaryPredictor.get_cutoff_idx(auto_exc_cells, curr_y, prev_cutoff_idx)
 
             current_exc_cells = auto_exc_cells.iloc[lower_cutoff_idx:cutoff_idx]
 
@@ -277,7 +352,7 @@ class LayerPredictor:
         if self.use_soma_vol_std:
             exc_features_df["soma_vol_std"] = exc_soma_vol_std_by_depth
         for col in exc_features_df.columns:
-            exc_features_df[col] = LayerPredictor.clean_nans(exc_features_df[col], normalize=True)
+            exc_features_df[col] = BoundaryPredictor.clean_nans(exc_features_df[col], normalize=True)
 
         ### PCA on the features to remove correlations
         if self.num_PCA is not None:
@@ -311,7 +386,7 @@ class LayerPredictor:
         self.column_labels = list(exc_features_df.columns) if self.num_PCA is None else [f"PCA {i}" for i in range(self.num_PCA)]
         if self.use_depth:
             # this is here because depth shouldn't go into PCA
-            varis = np.hstack([varis, LayerPredictor.clean_nans(exc_soma_depths, normalize=True).reshape(-1, 1)])
+            varis = np.hstack([varis, BoundaryPredictor.clean_nans(exc_soma_depths, normalize=True).reshape(-1, 1)])
             self.column_labels.append("depth")
 
         return bin_centers, varis, exc_soma_densities
@@ -351,7 +426,7 @@ class LayerPredictor:
                         -1] if self.use_depth else None  # to help reduce major errors, these will be the means for the depth emissions
 
         # the package has it's own convergence monitor, but I want fine control over it so I'm doing it manually
-        prev_score = -1
+        prev_score = 100_000_000_000  # big number
         score = model.score(varis)
         max_iters = 100
         tol = 0.001
@@ -390,6 +465,7 @@ class LayerPredictor:
             idx = hmm_layers.index(i)
             bounds.append((bin_centers[idx] + bin_centers[idx - 1]) / 2)
 
+        # linearly interpolate the outermost bounds based on exc soma density
         l1_2_thresh = 120_000
         l1_2_idx = np.nonzero(exc_soma_densities > l1_2_thresh)[0][0]
         l1_2_bound = bin_centers[l1_2_idx - 1] + (bin_centers[l1_2_idx] - bin_centers[l1_2_idx - 1]) \
@@ -442,7 +518,7 @@ class LayerPredictor:
         return i  # new_cutoff_idx
 
     @staticmethod
-    def get_snaking_cols(overall_bbox, col_size=(100., 100.), step_size=25.):
+    def get_snaking_cols(overall_bbox, col_size=(100., 100.), ngridpts=(32, 16)):
         """
         Calculates the bounding boxes of columns along a snaking path through the provided bounding box, such that
         adjacent bboxs in the resulting list are spatially adjacent
@@ -450,17 +526,15 @@ class LayerPredictor:
             desired region of the dataset
         :param col_size: (tuple of float) size, in microns, of the x and z dimensions of the columns. 100x100 columns
             provide sufficient information to make reasonably reliable HMMs
-        :param step_size: (float) center to center distance, in microns, of adjacent columns. If this is less than
-            col_size, columns will overlap.
+        :param ngrdipts: (tuple of int) the x and z dimensions of the grid of cortical columns.
+                ngridpts[0] * ngridpts[1] columns will be used
         :return: (list of 2x3 np.arrays of floats) the nm coordinates of the minimum corner and maximum corner of
                 the col_size[0] x full depth x col_size[1] columns within the provided bounding box. They are listed starting
                 from the minimum corner and snaking back and forth across the data set, ending at maximum x.
         """
         seg_low_um, seg_up_um = overall_bbox[0], overall_bbox[1]
-        seg_size_um = seg_up_um - seg_low_um
 
         col_size = np.array(col_size)  # x and z dimensions of column
-        ngridpts = ((seg_size_um[[0, 2]] - col_size) // step_size).astype(int)  # number of grid points in x and z directions
         col_center_xs = np.linspace(seg_low_um[0] + col_size[0] // 2, seg_up_um[0] - col_size[0] // 2, ngridpts[0])
         col_center_zs = np.linspace(seg_low_um[2] + col_size[1] // 2, seg_up_um[2] - col_size[1] // 2, ngridpts[1])
 
@@ -472,7 +546,72 @@ class LayerPredictor:
                 col_low = [x - offx, seg_low_um[1], z - offz]
                 col_up = [x + offx, seg_up_um[1], z + offz]
                 cols_nm.append(np.array([col_low, col_up]) * 1_000)
-        return cols_nm
+        return cols_nm, col_center_xs, col_center_zs
+
+    @staticmethod
+    def smooth_bounds(pred, smoothness=1):
+        """
+        in-place smooths the prediction by convolving with 3x3 gaussian kernel
+        :param smoothness: radius of the gaussian
+        """
+        spatial_array = LayerPrediction.to_spatial_array(pred.bounds, pred.ngridpts)
+        kernel_gridx, kernel_gridz = np.meshgrid(np.arange(-1, 2), np.arange(-1, 2))
+        kernel = np.exp(-(kernel_gridx ** 2 + kernel_gridz ** 2) / smoothness)
+        kernel /= np.sum(kernel)
+        smoothed_spatial_bounds = np.empty(spatial_array.shape)
+        for i in range(5):
+            smoothed_spatial_bounds[:, :, i] = convolve2d(spatial_array[:, :, i], kernel, boundary="symm", mode="same")
+        pred.bounds = LayerPrediction.to_snaking_array(smoothed_spatial_bounds)
+
+
+class LayerClassifier:
+    """
+    Takes the resulting layer borders from LayerPredictor, cleans them up,
+    and classifies which layer a given point is in
+    """
+    LAYER_NAMES = np.array(["L1", "L23", "L4", "L5", "L6", "WM"], dtype=object)
+
+    def __init__(self, data_path):
+        """
+        :param data_path: path to the pickled LayerPrediction object. Currently only simple predictions are supported
+                        as opposed to predictions generated using LayerPredictor.predict_with_sensitivity()
+        """
+        self.data_path = data_path
+        self.pred = LayerPrediction.load_pickle(data_path)
+        if self.pred.bounds.ndim != 2:
+            raise ValueError("""Currently only simple predictions are supported
+                        as opposed to predictions generated using LayerPredictor.predict_with_sensitivity()""")
+        self.spatial_array = LayerPrediction.to_spatial_array(self.pred.bounds, self.pred.ngridpts)
+        self.layer_funcs = []
+        for i in range(5):
+            self.layer_funcs.append(
+                interpolate.interp2d(self.pred.col_center_xs, self.pred.col_center_zs,
+                                     self.spatial_array[:, :, i].T, kind="linear"))
+
+    def predict(self, pts):
+        """
+        returns which layer each of the given points belongs to
+        :param pts: (np.array of shape (n, 3)) nanometer points to classify the layer of
+        :return:
+        """
+        if any(pts[:, 0] > self.pred.overall_bbox[1][0] * 1000 + 50_000) \
+                or any(pts[:, 0] < self.pred.overall_bbox[0][0] * 1000 - 50_000) \
+                or any(pts[:, 2] > self.pred.overall_bbox[1][2] * 1000 + 50_000) \
+                or any(pts[:, 2] < self.pred.overall_bbox[0][2] * 1000 - 50_000):  # um
+            warnings.warn(
+                """Some points are more than 50 microns laterally from the region where the predictions were made.
+                The will be mapped to the nearest known point.""")
+
+        results = np.zeros((pts.shape[0],), dtype=object)
+        bounds = np.zeros((pts.shape[0], len(self.layer_funcs) + 2), dtype=np.float64)
+        bounds[:, 0] = -2 ** 30
+        for i in range(len(self.layer_funcs)):
+            for j in range(bounds.shape[0]):
+                bounds[j, i + 1] = self.layer_funcs[i](pts[j, 0] / 1_000, pts[j, 2] / 1_000)[0] * 1_000_000
+        bounds[:, -1] = 2 ** 30
+        for i in range(bounds.shape[1] - 1):
+            results[(bounds[:, i] < pts[:, 1]) & (pts[:, 1] <= bounds[:, i + 1])] = LayerClassifier.LAYER_NAMES[i]
+        return results
 
 
 if __name__ == "__main__":
@@ -481,12 +620,16 @@ if __name__ == "__main__":
     # conservative bbox only containing well-segmented areas
     seg_low_um = np.array([130_000, 50_000, 15_000]) * resolution / 1_000
     seg_up_um = np.array([355_000, 323_500, 27_500]) * resolution / 1_000
-
-    cols_nm = LayerPredictor.get_snaking_cols(np.array([seg_low_um, seg_up_um]), col_size=(100, 100), step_size=25)
-
-    p = LayerPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True, resolution=resolution, save_figs=True, verbose=True, name="25um_step_with_sensitivity")
-
+    name = "small_test"
+    p = BoundaryPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True,
+                          resolution=resolution, save_figs=True, verbose=True,
+                          name=name)
     # bboxs = [minnie_col + i * np.array([25_000, 0, 0]) for i in range(27)]  # move along x
-    bounds = p.predict(cols_nm[426:428])
+    pred = p.predict(np.array([seg_low_um, seg_up_um]), col_size=(100, 100), ngridpts=(2, 2))
     # bounds = p.predict_with_sensitivity(cols_nm, ntrials=8, noise_scale=0.02)
-    print(bounds)
+    print(pred)
+
+    pred = LayerPrediction.load_pickle(f"{name}_prediction.pkl")
+    c = LayerClassifier(data_path=f"{name}_prediction.pkl")
+    inpt = np.array(pred.cols_nm)[0:2, 0].copy()
+    c.predict(inpt)
