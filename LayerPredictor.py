@@ -68,6 +68,11 @@ class LayerPrediction:
                 smoothed_bounds.extend(spatial_arr[i, ::-1, ...].tolist())
         return np.array(smoothed_bounds)
 
+    def deepcopy(self):
+        return LayerPrediction(self.cols_nm.copy(), self.ngridpts, self.bounds.copy(),
+                               self.col_center_xs.copy(), self.col_center_zs.copy(), self.overall_bbox.copy(),
+                               self.name, self.cache_dir)
+
 
 class BoundaryPredictor:
     """

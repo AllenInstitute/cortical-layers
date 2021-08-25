@@ -1,4 +1,6 @@
 *.pkl
+!minnie_full/smooth_minnie_full_prediction.pkl
+!minnie_full/minnie_full_prediction.pkl
 *.npy
 *.svg
 *.png
