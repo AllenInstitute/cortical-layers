@@ -616,6 +616,7 @@ class LayerClassifier:
         :param pts: (np.array of shape (n, 3)) nanometer points to classify the layer of
         :return:
         """
+        pts = np.asarray(pts)
         if any(pts[:, 0] > self.pred.overall_bbox[1][0] * 1000 + 50_000) \
                 or any(pts[:, 0] < self.pred.overall_bbox[0][0] * 1000 - 50_000) \
                 or any(pts[:, 2] > self.pred.overall_bbox[1][2] * 1000 + 50_000) \

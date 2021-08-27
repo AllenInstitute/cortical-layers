@@ -28,7 +28,7 @@ setup(
     description="a tool to interact with cortical layer labels of MICrONS EM segmentation data",
     author="Alex Mallen",
     author_email="atmallen@uw.edu,",
-    url="https://github.com/AlexTMallen/cortical-layers",
+    url="https://github.com/AllenInstitute/cortical-layers",
     packages=["cortical_layers"],
     include_package_data=True,
     install_requires=required,
