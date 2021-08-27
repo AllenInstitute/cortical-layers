@@ -589,8 +589,8 @@ class LayerClassifier:
     """
     LAYER_NAMES = np.array(["L1", "L23", "L4", "L5", "L6", "WM"], dtype=object)
     # hard-coded mapping from aligned volume names to the path of that volume's layer prediction
-    ALIGNED_VOL_TO_DATA_PATH = {"minnie65_phase3": os.path.join(os.path.abspath(os.path.dirname(__file__)), "..",
-                                                                "minnie65_full", "smooth_minnie65_full_prediction.json")}
+    ALIGNED_VOL_TO_DATA_PATH = {"minnie65_phase3": os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                                                "smooth_minnie65_full_prediction.json")}
 
     def __init__(self, data):
         """
