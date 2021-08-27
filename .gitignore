@@ -1,6 +1,4 @@
 *.pkl
-!minnie_full/smooth_minnie_full_prediction.pkl
-!minnie_full/minnie_full_prediction.pkl
 *.npy
 *.svg
 *.png
@@ -10,6 +8,8 @@
 *.json
 layermeshes/
 
+!minnie65_full/smooth_minnie65_full_prediction.json
+!minnie65_full/minnie65_full_prediction.json
 .idea
 
 # Byte-compiled / optimized / DLL files

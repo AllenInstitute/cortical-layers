@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.cm import get_cmap
 import os
-import pickle
+import json
 from scipy.signal import convolve2d
 from scipy import interpolate
 import warnings
@@ -17,25 +17,33 @@ class LayerPrediction:
     the values of the prediction, and the shape of the grid over which the predictions were made
     """
 
-    def __init__(self, columns_nm, num_gridpts, boundaries, col_center_xs, col_center_zs,
+    def __init__(self, cols_nm, ngridpts, bounds, col_center_xs, col_center_zs,
                  overall_bbox, name="layer_prediction", cache_dir="."):
-        self.cols_nm = columns_nm
-        self.ngridpts = num_gridpts
-        self.bounds = boundaries
-        self.col_center_xs, self.col_center_zs = col_center_xs, col_center_zs
-        self.overall_bbox = overall_bbox
+        self.cols_nm = np.array(cols_nm)
+        self.ngridpts = tuple(ngridpts)
+        self.bounds = np.array(bounds)
+        self.col_center_xs, self.col_center_zs = np.array(col_center_xs), np.array(col_center_zs)
+        self.overall_bbox = np.array(overall_bbox)
         self.name = name
         self.cache_dir = cache_dir
 
-    def save_pickle(self):
-        with open(os.path.join(self.cache_dir, f"{self.name}.pkl"), "wb") as f:
-            pickle.dump(self, f)
+    def save(self):
+        attr_dict = {"cols_nm": self.cols_nm.tolist(),
+                     "ngridpts": self.ngridpts,
+                     "bounds": self.bounds.tolist(),
+                     "col_center_xs": self.col_center_xs.tolist(),
+                     "col_center_zs": self.col_center_zs.tolist(),
+                     "overall_bbox": self.overall_bbox.tolist(),
+                     "name": self.name,
+                     "cache_dir": self.cache_dir}
+        with open(os.path.join(self.cache_dir, f"{self.name}.json"), "w") as f:
+            f.write(json.dumps(attr_dict))
 
     @staticmethod
-    def load_pickle(dir):
+    def load(dir):
         with open(dir, "rb") as f:
-            o = pickle.load(f)
-        return o
+            attr_dict = json.loads(f.read())
+        return LayerPrediction(**attr_dict)
 
     @staticmethod
     def to_spatial_array(snaking_arr, ngridpts):
@@ -113,8 +121,10 @@ class BoundaryPredictor:
         :param verbose=False dictates whether printing and plotting occurs
         :param default_bounds (np.array of shape (7,)): the default boundaries to use to initialize the HMM.
                This value is updated every time predict_col is called
-        :param: cache_dir: default: ".", the directory where to store resulting plots and predictions
-        :param: name: default: "layers", the name of this layer predictor to use for file naming
+        :param cache_dir: default: ".", the directory where to store resulting plots and predictions
+        :param name: default: "layers", the name of this layer predictor to use for file naming
+        :param l1_2_thresh=120_000: density threshold in mm^-3 to use for determining layer 1-2 border
+        :param l6_WM_thresh=50_000: density threshold in mm^-3 to use for determining layer 6-white matter border
         """
         self.bin_width = bin_width
         self.step_size = step_size
@@ -129,6 +139,8 @@ class BoundaryPredictor:
             [0.3, 0.400516, 0.555516, 0.700516, 0.830516, 1.010516, 1.1])  # from HMM trained on 2 PCA modes in column
         self.name = kwargs["name"] if "name" in kwargs else "layers"
         self.cache_dir = kwargs["cache_dir"] if "cache_dir" in kwargs else "."
+        self.l1_2_thresh = kwargs["l1_2_thresh"] if "l1_2_thresh" in kwargs else 120_000
+        self.l6_WM_thresh = kwargs["l6_WM_thresh"] if "l6_WM_thresh" in kwargs else 50_000
         self.column_labels = None  # list of the column labels of varis
 
     def _init_data(self):
@@ -175,7 +187,7 @@ class BoundaryPredictor:
                 the region of interest, which will be broken into many smaller columns of size col_size and predicted
         :param col_size: (tuple of float) size, in microns, of the x and z dimensions of the columns. 100x100 columns
                provide sufficient information to make reasonably reliable HMMs
-        :param ngrdipts: (tuple of int) the x and z dimensions of the grid of cortical columns.
+        :param ngridpts: (tuple of int) the x and z dimensions of the grid of cortical columns.
                 ngridpts[0] * ngridpts[1] columns will be used
         :param ntrials=10 (int) number of trials to use for sensitivity analysis
         :param noise_scale=0.02 (float) the std in mm of random normal noise to use for sensitivity analysis
@@ -202,9 +214,9 @@ class BoundaryPredictor:
                 results[i, :, tr] = self._predict_col(bbox, idx=i * ntrials + tr)
             self.default_bounds[1:-1] = results[i, :, :].mean(axis=1)
             if i % 10 == 9:
-                pred.save_pickle()
+                pred.save()
                 plt.close("all")  # free up RAM
-        pred.save_pickle()
+        pred.save()
         plt.close("all")  # free up RAM
         return pred
 
@@ -216,7 +228,7 @@ class BoundaryPredictor:
                 the region of interest, which will be broken into many smaller columns of size col_size and predicted
         :param col_size: (tuple of float) size, in microns, of the x and z dimensions of the columns. 100x100 columns
             provide sufficient information to make reasonably reliable HMMs
-        :param ngrdipts: (tuple of int) the x and z dimensions of the grid of cortical columns.
+        :param ngridpts: (tuple of int) the x and z dimensions of the grid of cortical columns.
                 ngridpts[0] * ngridpts[1] columns will be used
         :return np.array of shape (len(bboxs), 5): the respective layer boundaries [L1/L23, L23/L4, L4/L5, L5/L6, L6/WM] for each bbox in bboxs
         """
@@ -232,9 +244,9 @@ class BoundaryPredictor:
                 print("\nWORKING ON", i, bbox)
             results[i, :] = self._predict_col(bbox, idx=i)
             if i % 10 == 9:
-                pred.save_pickle()
+                pred.save()
                 plt.close("all")  # free up RAM
-        pred.save_pickle()
+        pred.save()
         plt.close("all")  # free up RAM
         plt.show()
         return pred
@@ -269,7 +281,7 @@ class BoundaryPredictor:
         if self.verbose:
             print("success.")
 
-            model = self._hmm_fit(bin_centers, varis)
+        model = self._hmm_fit(bin_centers, varis)
 
         bounds, hmm_layers, posteriors = self._hmm_predict(model, bin_centers, varis, exc_soma_densities)
 
@@ -308,7 +320,7 @@ class BoundaryPredictor:
         """
         calculates the features used for the HMM
         :param bbox: bbox of column
-        :param auto_exc_cells: df of cells in column with features attached
+        :param auto_col_cells: df of (excitatory) cells in column with features attached
         :return bin_centers: the 1D array of mm depths at which the features were calculated
                 varis: the 2D array of features to be used for the HMM, normalized and cleaned of nans
                 exc_soma_densities: density of excitatory somas in #/mm^3
@@ -471,15 +483,14 @@ class BoundaryPredictor:
             bounds.append((bin_centers[idx] + bin_centers[idx - 1]) / 2)
 
         # linearly interpolate the outermost bounds based on exc soma density
-        l1_2_thresh = 120_000
-        l1_2_idx = np.nonzero(exc_soma_densities > l1_2_thresh)[0][0]
+
+        l1_2_idx = np.nonzero(exc_soma_densities > self.l1_2_thresh)[0][0]
         l1_2_bound = bin_centers[l1_2_idx - 1] + (bin_centers[l1_2_idx] - bin_centers[l1_2_idx - 1]) \
-                    * (l1_2_thresh - exc_soma_densities[l1_2_idx - 1]) / (
+                    * (self.l1_2_thresh - exc_soma_densities[l1_2_idx - 1]) / (
                                 exc_soma_densities[l1_2_idx] - exc_soma_densities[l1_2_idx - 1])
-        l6_wm_thresh = 50_000
-        l6_wm_idx = np.nonzero(exc_soma_densities > l6_wm_thresh)[0][-1]
+        l6_wm_idx = np.nonzero(exc_soma_densities > self.l6_WM_thresh)[0][-1]
         l6_wm_bound = bin_centers[l6_wm_idx] + (bin_centers[l6_wm_idx + 1] - bin_centers[l6_wm_idx]) \
-                    * (l6_wm_thresh - exc_soma_densities[l6_wm_idx]) / (
+                    * (self.l6_WM_thresh - exc_soma_densities[l6_wm_idx]) / (
                                 exc_soma_densities[l6_wm_idx + 1] - exc_soma_densities[l6_wm_idx])
         bounds = [l1_2_bound] + bounds + [l6_wm_bound]
         bounds = np.array(bounds)
@@ -531,7 +542,7 @@ class BoundaryPredictor:
             desired region of the dataset
         :param col_size: (tuple of float) size, in microns, of the x and z dimensions of the columns. 100x100 columns
             provide sufficient information to make reasonably reliable HMMs
-        :param ngrdipts: (tuple of int) the x and z dimensions of the grid of cortical columns.
+        :param ngridpts: (tuple of int) the x and z dimensions of the grid of cortical columns.
                 ngridpts[0] * ngridpts[1] columns will be used
         :return: (list of 2x3 np.arrays of floats) the nm coordinates of the minimum corner and maximum corner of
                 the col_size[0] x full depth x col_size[1] columns within the provided bounding box. They are listed starting
@@ -557,6 +568,7 @@ class BoundaryPredictor:
     def smooth_bounds(pred, smoothness=1):
         """
         in-place smooths the prediction by convolving with 3x3 gaussian kernel
+        :param pred: LayerPrediction object
         :param smoothness: radius of the gaussian
         """
         spatial_array = LayerPrediction.to_spatial_array(pred.bounds, pred.ngridpts)
@@ -575,14 +587,18 @@ class LayerClassifier:
     and classifies which layer a given point is in
     """
     LAYER_NAMES = np.array(["L1", "L23", "L4", "L5", "L6", "WM"], dtype=object)
+    # hard-coded mapping from aligned volume names to the path of that volume's layer prediction
+    ALIGNED_VOL_TO_DATA_PATH = {"minnie65_phase3": os.path.join(os.path.abspath(os.path.dirname(__file__)), "..",
+                                                                "minnie65_full", "smooth_minnie65_full_prediction.json")}
 
-    def __init__(self, data_path):
+    def __init__(self, data):
         """
-        :param data_path: path to the pickled LayerPrediction object. Currently only simple predictions are supported
-                        as opposed to predictions generated using LayerPredictor.predict_with_sensitivity()
+        :param data: name of an aligned volume (e.g. "minnie65_phase3") or path to a jsonified LayerPrediction object.
+                        Currently only simple point predictions are supported
+                        ( as opposed to predictions generated using LayerPredictor.predict_with_sensitivity() )
         """
-        self.data_path = data_path
-        self.pred = LayerPrediction.load_pickle(data_path)
+        self.data_path = data if data not in LayerClassifier.ALIGNED_VOL_TO_DATA_PATH else LayerClassifier.ALIGNED_VOL_TO_DATA_PATH[data]
+        self.pred = LayerPrediction.load(self.data_path)
         if self.pred.bounds.ndim != 2:
             raise ValueError("""Currently only simple predictions are supported
                         as opposed to predictions generated using LayerPredictor.predict_with_sensitivity()""")
@@ -602,10 +618,10 @@ class LayerClassifier:
         if any(pts[:, 0] > self.pred.overall_bbox[1][0] * 1000 + 50_000) \
                 or any(pts[:, 0] < self.pred.overall_bbox[0][0] * 1000 - 50_000) \
                 or any(pts[:, 2] > self.pred.overall_bbox[1][2] * 1000 + 50_000) \
-                or any(pts[:, 2] < self.pred.overall_bbox[0][2] * 1000 - 50_000):  # um
+                or any(pts[:, 2] < self.pred.overall_bbox[0][2] * 1000 - 50_000):  # nm
             warnings.warn(
                 """Some points are more than 50 microns laterally from the region where the predictions were made.
-                The will be mapped to the nearest known point.""")
+                They will be mapped to the nearest known point.""")
 
         results = np.zeros((pts.shape[0],), dtype=object)
         bounds = np.zeros((pts.shape[0], len(self.layer_funcs) + 2), dtype=np.float64)
@@ -634,7 +650,7 @@ if __name__ == "__main__":
     # bounds = p.predict_with_sensitivity(cols_nm, ntrials=8, noise_scale=0.02)
     print(pred)
 
-    pred = LayerPrediction.load_pickle(f"{name}_prediction.pkl")
-    c = LayerClassifier(data_path=f"{name}_prediction.pkl")
+    pred = LayerPrediction.load(f"{name}_prediction.json")
+    c = LayerClassifier(data=f"{name}_prediction.json")
     inpt = np.array(pred.cols_nm)[0:2, 0].copy()
     c.predict(inpt)
