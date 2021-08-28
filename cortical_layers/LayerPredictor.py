@@ -19,15 +19,31 @@ class LayerPrediction:
 
     def __init__(self, cols_nm, ngridpts, bounds, col_center_xs, col_center_zs,
                  overall_bbox, name="layer_prediction", cache_dir="."):
+        """
+        :param cols_nm: array of shape (n, 2, 3) of the bounding boxs of the columns for which the
+                        predictions were made, in nanometers
+        :param ngridpts: tuple of length 2. Grid shape of the columns. n = ngridpts[0] * ngridpts[1]
+        :param bounds: np.array of shape (n, 5). The depths of the layer boundaries for each column (`cols_nm`) in mm.
+                        These are the predictions.
+        :param col_center_xs, col_center_zs: np.array of shape (ngridpts[0],) for x, or (ngridpts[1],) for z
+                        the center positions, in microns, of the columns along the x and z axes
+        :param overall_bbox: np.array of shape (2, 3). bounding box containing all and only those cell positions that
+                        were used for the predictions
+        :param name: str. name used for file naming when `save` is called (f"{self.name}.json")
+        :param cache_dir: str. used for file directory when `save` is called
+        """
         self.cols_nm = np.array(cols_nm)
         self.ngridpts = tuple(ngridpts)
-        self.bounds = np.array(bounds)  # mm
-        self.col_center_xs, self.col_center_zs = np.array(col_center_xs), np.array(col_center_zs)
-        self.overall_bbox = np.array(overall_bbox)
+        self.bounds = np.array(bounds)
+        self.col_center_xs, self.col_center_zs = np.array(col_center_xs), np.array(col_center_zs)  # microns
+        self.overall_bbox = np.array(overall_bbox)  # microns
         self.name = name
         self.cache_dir = cache_dir
 
     def save(self):
+        """
+        Saves this prediction in os.path.join(self.cache_dir, f"{self.name}.json")
+        """
         attr_dict = {"cols_nm": self.cols_nm.tolist(),
                      "ngridpts": self.ngridpts,
                      "bounds": self.bounds.tolist(),
@@ -40,8 +56,13 @@ class LayerPrediction:
             f.write(json.dumps(attr_dict))
 
     @staticmethod
-    def load(dir):
-        with open(dir, "rb") as f:
+    def load(path):
+        """
+        returns a layer prediction object from the json data specified
+        :param path: path to jsonified prediction
+        :return: LayerPrediction object
+        """
+        with open(path, "rb") as f:
             attr_dict = json.loads(f.read())
         return LayerPrediction(**attr_dict)
 
@@ -55,6 +76,7 @@ class LayerPrediction:
         :param ngridpts: (list-like of length 2) representing the number of grid points in the x and z directions
         :return: np.array of shape (ngridpts[0], ngridpts[1], *snaking_arr.shape[1:])
         """
+        snaking_arr = np.asarray(snaking_arr)
         spatial_array = snaking_arr.reshape((ngridpts[0], ngridpts[1], *snaking_arr.shape[1:])).copy()
         for i in range(1, spatial_array.shape[0], 2):  # reverse every other x slice
             spatial_array[i, :, ...] = spatial_array[i, ::-1, ...]
@@ -125,6 +147,7 @@ class BoundaryPredictor:
         :param name: default: "layers", the name of this layer predictor to use for file naming
         :param l1_2_thresh=120_000: density threshold in mm^-3 to use for determining layer 1-2 border
         :param l6_WM_thresh=50_000: density threshold in mm^-3 to use for determining layer 6-white matter border
+        :param soma_table_path: The path of the pickled soma features table
         """
         self.bin_width = bin_width
         self.step_size = step_size
@@ -141,6 +164,7 @@ class BoundaryPredictor:
         self.cache_dir = kwargs["cache_dir"] if "cache_dir" in kwargs else "."
         self.l1_2_thresh = kwargs["l1_2_thresh"] if "l1_2_thresh" in kwargs else 120_000
         self.l6_WM_thresh = kwargs["l6_WM_thresh"] if "l6_WM_thresh" in kwargs else 50_000
+        self.soma_table_path = kwargs["soma_table_path"] if "soma_table_path" in kwargs else "Minnie_soma_nuc_feature_model_83_1.pkl"
         self.column_labels = None  # list of the column labels of varis
 
     def _init_data(self):
@@ -166,7 +190,7 @@ class BoundaryPredictor:
         if self.verbose:
             print("loading soma features... ", end="")
         self.soma_features = pd.read_pickle(
-            "Minnie_soma_nuc_feature_model_83_1.pkl")  # TODO this isn't available to everyone
+            self.soma_table_path)  # TODO this isn't available to everyone
         if self.verbose:
             print("success.")
 
