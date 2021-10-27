@@ -834,6 +834,28 @@ class LayerClassifier:
             ] = LayerClassifier.LAYER_NAMES[i]
         return results
 
+    @property
+    def layer_names(self):
+        return LayerClassifier.LAYER_NAMES
+
+    def layer_bounds(self, x, z):
+        """Get all layer bounds for a given x, z location.
+        Parameters
+        ----------
+        x : float
+            x-position in nm
+        z : float
+            z-position in nm
+        Returns
+        -------
+        layer_bounds : array
+            Layer bounds in nm
+        """
+        bnds = []
+        for f in self.layer_funcs:
+            bnds.append(f(x / 1000, z / 1000)[0])
+        return np.array(bnds) * 1_000_000
+
 
 if __name__ == "__main__":
     resolution = np.array([4.0, 4.0, 40.0])
