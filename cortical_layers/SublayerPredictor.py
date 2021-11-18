@@ -9,7 +9,7 @@ from scipy import interpolate
 import warnings
 from hmmlearn import hmm
 from caveclient import CAVEclient
-from LayerPredictor import BoundaryPredictor, LayerClassifier, LayerPrediction
+from cortical_layers.LayerPredictor import BoundaryPredictor, LayerClassifier, LayerPrediction
 
 
 class SubBoundaryPredictor:
@@ -22,6 +22,7 @@ class SubBoundaryPredictor:
                  resolution=(4., 4., 40.),
                  features=("soma_volume",),
                  use_depth=False,
+                 use_exc_soma_density=True,
                  use_soma_vol_std=True,
                  num_PCA=None,
                  save_figs=False,
@@ -45,6 +46,8 @@ class SubBoundaryPredictor:
         :param use_depth determines whether depth should be a features
         :param use_soma_vol_std determines whether the standard deviation of soma volume at each depth should also
                be used as a feature (all the other features take the mean only)
+        :param use_exc_soma_density determines whether the excitatory soma density at each depth should also
+               be used as a feature (all the other features are means over cells)
         :param num_PCA (None or int)  indicates how many PCA modes should be used. Default: None, which indicates the
             raw features should be used without performing PCA
         :param save_figs=False dictates whether plots should be saved to disk
@@ -63,6 +66,7 @@ class SubBoundaryPredictor:
         self.features = list(features)
         self.use_depth = use_depth
         self.use_soma_vol_std = use_soma_vol_std
+        self.use_exc_soma_density = use_exc_soma_density
         self.num_PCA = num_PCA
         self.save_figs = save_figs
         self.verbose = verbose
@@ -73,7 +77,8 @@ class SubBoundaryPredictor:
         self.cache_dir = kwargs["cache_dir"] if "cache_dir" in kwargs else "."
         self.l1_2_thresh = kwargs["l1_2_thresh"] if "l1_2_thresh" in kwargs else 120_000
         self.l6_WM_thresh = kwargs["l6_WM_thresh"] if "l6_WM_thresh" in kwargs else 50_000
-        self.soma_table_path = kwargs["soma_table_path"] if "soma_table_path" in kwargs else "Minnie_soma_nuc_feature_model_83_1.pkl"
+        self.soma_table_path = kwargs[
+            "soma_table_path"] if "soma_table_path" in kwargs else "Minnie_soma_nuc_feature_model_83_1.pkl"
         self.column_labels = None  # list of the column labels of varis
 
     def _init_data(self):
@@ -110,13 +115,18 @@ class SubBoundaryPredictor:
         # soma area and nucleus area closely track their respective volumes
         # avg sdf is a list of the 'diameters' of processes (e.g. dendrites) that leave each cell body
 
-    def predict(self, base_pred: LayerPrediction, layer: str, num_sublayers: int):
+    def predict(self, base_pred: LayerPrediction, layer: str, num_sublayers: int, min_depth=None, col_size=None):
         """
         Calculates the requested features at each depth and uses them to predict the boundaries between cortical layers
         for the provided region
         :param base_pred: a LayerPrediction object for which you would like to refine layer predictions within the given layer
         :param layer: the layer to subdivide
         :param num_sublayers: number of subdivisions
+        :param min_depth = None the minimum depth (as a fraction of the way between the minimum depth within `layer` and
+          the maximum depth within `layer`) at which a layer boundary should be placed
+        :param col_size = None optionally override the column width from the base_pred to include a large/smaller number
+          of cells in determining the sublayer borders
+
         :return np.array of shape (len(bboxs), 5): the respective layer boundaries [L1/L23, L23/L4, L4/L5, L5/L6, L6/WM] for each bbox in bboxs
         """
         LAYER_NAMES = ("L1", "L23", "L4", "L5", "L6", "WM")
@@ -124,8 +134,8 @@ class SubBoundaryPredictor:
         assert num_sublayers < 6, "too many sublayers"
         assert base_pred.bounds.shape[1] == 5, "given prediction doesn't have 5 layers"
         overall_bbox = base_pred.overall_bbox
-        col_size = ((base_pred.cols_nm[0, 1, 0] - base_pred.cols_nm[0, 0, 0]) / 1000,
-                    (base_pred.cols_nm[0, 1, 2] - base_pred.cols_nm[0, 0, 2]) / 1000)  # microns
+        col_size = ((base_pred.cols_nm[0, 1, 0] - base_pred.cols_nm[0, 0, 0]) / 1000,  # microns
+                    (base_pred.cols_nm[0, 1, 2] - base_pred.cols_nm[0, 0, 2]) / 1000) if col_size is None else col_size
         ngridpts = base_pred.ngridpts
         self._init_data()
         bboxs, col_center_xs, col_center_zs = BoundaryPredictor.get_snaking_cols(overall_bbox, col_size=col_size,
@@ -164,8 +174,8 @@ class SubBoundaryPredictor:
             self.default_bounds[0] = 0.3  # pia border
             self.default_bounds[-1] = 1.1  # end of sample
             slope = (self.default_bounds[sub_idxs[-1] + 2] - self.default_bounds[sub_idxs[0]]) / (len(sub_idxs) + 1)
-            self.default_bounds[sub_idxs + 1] = (sub_idxs - (sub_idxs[0] - 1)) * slope + self.default_bounds[sub_idxs[0]]
-
+            self.default_bounds[sub_idxs + 1] = (sub_idxs - (sub_idxs[0] - 1)) * slope + self.default_bounds[
+                sub_idxs[0]]
 
         for i, b in enumerate(bboxs):
             bbox = b / self.resolution
@@ -173,7 +183,8 @@ class SubBoundaryPredictor:
                 print("\nWORKING ON", i, bbox)
             start_depth = pred.bounds[i, sub_idxs[0] - 1] if sub_idxs[0] - 1 >= 0 else -1e10
             end_depth = pred.bounds[i, sub_idxs[-1] + 1] if sub_idxs[-1] + 1 < pred.bounds.shape[1] else 1e10
-            pred.bounds[i, sub_idxs] = self._predict_col(bbox, start_depth, end_depth, num_sublayers, sub_idxs[0], idx=i)
+            pred.bounds[i, sub_idxs] = self._predict_col(bbox, start_depth, end_depth, num_sublayers, sub_idxs[0],
+                                                         idx=i, min_depth=min_depth)
             if i % 10 == 9:
                 pred.save()
                 plt.close("all")  # free up RAM
@@ -182,7 +193,7 @@ class SubBoundaryPredictor:
         plt.show()
         return pred
 
-    def _predict_col(self, bbox, start_depth, end_depth, num_sublayers, start_sub_idx, idx=None):
+    def _predict_col(self, bbox, start_depth, end_depth, num_sublayers, start_sub_idx, idx=None, min_depth=None):
         """
         makes layer boundary predictions for the particular column provided by bbox
         :param bbox: bounding box of column
@@ -192,7 +203,8 @@ class SubBoundaryPredictor:
         """
         soma_features_root_ids = set(self.soma_features.seg_id)
 
-        auto_col_cells = self.auto_cells[self.auto_cells.pt_position.apply(BoundaryPredictor.in_bbox, args=[bbox])].copy()
+        auto_col_cells = self.auto_cells[
+            self.auto_cells.pt_position.apply(BoundaryPredictor.in_bbox, args=[bbox])].copy()
         auto_col_cells["mm_depth"] = [auto_col_cells.pt_position.iloc[i][1] * self.resolution[1] / 1_000_000 for i in
                                       range(len(auto_col_cells))]
         # add soma features columns to auto_col_cells
@@ -209,7 +221,7 @@ class SubBoundaryPredictor:
 
         if self.verbose:
             print("calculating features by depth... ", end="")
-        bin_centers, varis, exc_soma_densities = self._calculate_features(bbox, start_depth, end_depth, auto_col_cells)
+        bin_centers, varis = self._calculate_features(bbox, start_depth, end_depth, auto_col_cells, min_depth=min_depth)
         if self.verbose:
             print("success.")
 
@@ -231,8 +243,8 @@ class SubBoundaryPredictor:
                 ax.plot(bin_centers, varis[:, i], color=c, label=self.column_labels[i])
                 ax.plot(bin_centers, model_means[:, i], linestyle="-.", color=c)
                 ax.fill_between(bin_centers, model_means[:, i] - model_stds[:, i],
-                                 model_means[:, i] + model_stds[:, i],
-                                 edgecolor="none", facecolor=c, alpha=0.2)
+                                model_means[:, i] + model_stds[:, i],
+                                edgecolor="none", facecolor=c, alpha=0.2)
 
             ax.axvline(bounds[0], linestyle="--", color="blue", label="automatic bounds")
             for bound in bounds[1:]:
@@ -248,24 +260,25 @@ class SubBoundaryPredictor:
 
         return bounds
 
-    def _calculate_features(self, bbox, start_depth, end_depth, auto_col_cells):
+    def _calculate_features(self, bbox, start_depth, end_depth, auto_col_cells, min_depth=None):
         """
         calculates the features used for the HMM
         :param bbox: bbox of column
         :param auto_col_cells: df of (excitatory) cells in column with features attached
         :return bin_centers: the 1D array of mm depths at which the features were calculated
                 varis: the 2D array of features to be used for the HMM, normalized and cleaned of nans
-                exc_soma_densities: density of excitatory somas in #/mm^3
         """
         auto_exc_cells = auto_col_cells.query("classification_system == 'aibs_coarse_excitatory'")
 
         # cross sectional area to be layered, in mm^2
         xarea = self.resolution[0] * self.resolution[2] * (bbox[1][0] - bbox[0][0]) * (
-                    bbox[1][2] - bbox[0][2]) / 1_000_000. ** 2
+                bbox[1][2] - bbox[0][2]) / 1_000_000. ** 2
 
         # min is pia border (with L1) and max is white matter border (with L6)
         min_y = max(np.min(auto_col_cells.mm_depth.values), start_depth)
         max_y = min(np.max(auto_col_cells.mm_depth.values), end_depth)
+        if min_depth is not None:
+            min_y = min_y + min_depth * (max_y - min_y)
 
         auto_exc_cells = auto_exc_cells.sort_values(axis="index", by="mm_depth")
 
@@ -297,7 +310,8 @@ class SubBoundaryPredictor:
         exc_soma_densities = np.array(exc_soma_densities, dtype=float) / (self.bin_width * xarea)  # per mm^3
 
         exc_features_df = pd.DataFrame(exc_soma_features_by_depth)
-        exc_features_df["soma_density"] = exc_soma_densities
+        if self.use_exc_soma_density:
+            exc_features_df["soma_density"] = exc_soma_densities
         if self.use_soma_vol_std:
             exc_features_df["soma_vol_std"] = exc_soma_vol_std_by_depth
         for col in exc_features_df.columns:
@@ -332,13 +346,14 @@ class SubBoundaryPredictor:
             Yc = V[:, :self.num_PCA].T @ Xc
 
         varis = exc_features_df.values if self.num_PCA is None else Yc.T
-        self.column_labels = list(exc_features_df.columns) if self.num_PCA is None else [f"PCA {i}" for i in range(self.num_PCA)]
+        self.column_labels = list(exc_features_df.columns) if self.num_PCA is None else [f"PCA {i}" for i in
+                                                                                         range(self.num_PCA)]
         if self.use_depth:
             # this is here because depth shouldn't go into PCA
             varis = np.hstack([varis, BoundaryPredictor.clean_nans(exc_soma_depths, normalize=True).reshape(-1, 1)])
             self.column_labels.append("depth")
 
-        return bin_centers, varis, exc_soma_densities
+        return bin_centers, varis
 
     def _hmm_fit(self, bin_centers, varis, num_sublayers, start_sub_idx):
         """
@@ -348,7 +363,8 @@ class SubBoundaryPredictor:
         :param start_sub_idx: the number of layer boundaries before the first subdivision
         :return: model: trained hidden markov model
         """
-        model = hmm.GaussianHMM(n_components=num_sublayers, covariance_type="diag", init_params="", params="mc", n_iter=1)
+        model = hmm.GaussianHMM(n_components=num_sublayers, covariance_type="diag", init_params="", params="mc",
+                                n_iter=1)
         # the model starts in the first state, and there is 0 probability of starting elsewhere
         model.startprob_ = np.zeros(model.n_components)
         model.startprob_[0] = 1
@@ -405,7 +421,6 @@ class SubBoundaryPredictor:
         computes the layer boundaries as predicted by model on observation varis, which were observed at depths bin_centers
         :param bin_centers: depths of varis in mm
         :param varis: np.array of shape (len(bin_centers), num_features), normalized and free of nans
-        :param exc_soma_densities: np.array of shape (len(bin_centers),) that contains the density of exc somas in mm^-3
         :param start_sub_idx: the number of layer boundaries before the first subdivision
         :return: bounds: predicted layer boundaries
                  hmm_layers: hmm prediction of which layer each index participates in (its hidden state)
@@ -506,7 +521,7 @@ class SubBoundaryPredictor:
         kernel = np.exp(-(kernel_gridx ** 2 + kernel_gridz ** 2) / smoothness)
         kernel /= np.sum(kernel)
         smoothed_spatial_bounds = np.empty(spatial_array.shape)
-        for i in range(5):
+        for i in range(spatial_array.shape[2]):
             smoothed_spatial_bounds[:, :, i] = convolve2d(spatial_array[:, :, i], kernel, boundary="symm", mode="same")
         pred.bounds = LayerPrediction.to_snaking_array(smoothed_spatial_bounds)
 
@@ -516,11 +531,12 @@ if __name__ == "__main__":
     # conservative bbox only containing well-segmented areas
     seg_low_um = np.array([130_000, 50_000, 15_000]) * resolution / 1_000
     seg_up_um = np.array([355_000, 323_500, 27_500]) * resolution / 1_000
-    name = "test"
-    p = SubBoundaryPredictor(features=("soma_volume", "nucleus_fract_fold"), num_PCA=None, use_depth=False, use_soma_vol_std=True,
-                          resolution=resolution, save_figs=True, verbose=True, cache_dir=r"..\sub6_test",
-                          name=name)
+    name = "sub6_soma_vol_and_density_second_half_only_200micron"
+    p = SubBoundaryPredictor(features=("soma_volume",),
+                             num_PCA=None, use_depth=False, use_exc_soma_density=True, use_soma_vol_std=False,
+                             resolution=resolution, save_figs=True, verbose=True, cache_dir="..\\" + name,
+                             name=name)
     c = LayerClassifier(data=f"minnie65_phase3")
-    pred = p.predict(c.pred, layer="L6", num_sublayers=2)
+    pred = p.predict(c.pred, layer="L6", num_sublayers=2, min_depth=0.5, col_size=[200., 200.])
     inpt = pred.cols_nm[0:2, 0].copy()
     c.predict(inpt)

@@ -601,7 +601,7 @@ class BoundaryPredictor:
         kernel = np.exp(-(kernel_gridx ** 2 + kernel_gridz ** 2) / smoothness)
         kernel /= np.sum(kernel)
         smoothed_spatial_bounds = np.empty(spatial_array.shape)
-        for i in range(5):
+        for i in range(pred.bounds.shape[1]):
             smoothed_spatial_bounds[:, :, i] = convolve2d(spatial_array[:, :, i], kernel, boundary="symm", mode="same")
         pred.bounds = LayerPrediction.to_snaking_array(smoothed_spatial_bounds)
 
@@ -629,7 +629,7 @@ class LayerClassifier:
                         as opposed to predictions generated using LayerPredictor.predict_with_sensitivity()""")
         self.spatial_array = LayerPrediction.to_spatial_array(self.pred.bounds, self.pred.ngridpts)
         self.layer_funcs = []
-        for i in range(5):
+        for i in range(self.pred.bounds.shape[1]):
             self.layer_funcs.append(
                 interpolate.interp2d(self.pred.col_center_xs, self.pred.col_center_zs,
                                      self.spatial_array[:, :, i].T, kind="linear"))
