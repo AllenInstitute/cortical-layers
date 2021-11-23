@@ -116,6 +116,7 @@ class LayerPrediction:
             self.overall_bbox.copy(),
             self.name,
             self.cache_dir,
+            self.layer_labels
         )
 
 
