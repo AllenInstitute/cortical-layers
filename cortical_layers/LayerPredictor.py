@@ -17,22 +17,13 @@ class LayerPrediction:
     the values of the prediction, and the shape of the grid over which the predictions were made
     """
 
-    def __init__(
-        self,
-        cols_nm,
-        ngridpts,
-        bounds,
-        col_center_xs,
-        col_center_zs,
-        overall_bbox,
-        name="layer_prediction",
-        cache_dir=".",
-    ):
+    def __init__(self, cols_nm, ngridpts, bounds, col_center_xs, col_center_zs,
+                 overall_bbox, name="layer_prediction", cache_dir=".", layer_labels=("L1", "L23", "L4", "L5", "L6", "WM")):
         """
         :param cols_nm: array of shape (n, 2, 3) of the bounding boxs of the columns for which the
                         predictions were made, in nanometers
         :param ngridpts: tuple of length 2. Grid shape of the columns. n = ngridpts[0] * ngridpts[1]
-        :param bounds: np.array of shape (n, 5). The depths of the layer boundaries for each column (`cols_nm`) in mm.
+        :param bounds: np.array of shape (n, len(layer_labels) - 1). The depths of the layer boundaries for each column (`cols_nm`) in mm.
                         These are the predictions.
         :param col_center_xs, col_center_zs: np.array of shape (ngridpts[0],) for x, or (ngridpts[1],) for z
                         the center positions, in microns, of the columns along the x and z axes
@@ -50,6 +41,7 @@ class LayerPrediction:
         self.overall_bbox = np.array(overall_bbox)  # microns
         self.name = name
         self.cache_dir = cache_dir
+        self.layer_labels = layer_labels
 
     def save(self):
         """
@@ -336,7 +328,7 @@ class BoundaryPredictor:
             bbox = b / self.resolution
             if self.verbose:
                 print("\nWORKING ON", i, bbox)
-            results[i, :] = self._predict_col(bbox, idx=i)
+            pred.results[i, :] = self._predict_col(bbox, idx=i)
             if i % 10 == 9:
                 pred.save()
                 plt.close("all")  # free up RAM
@@ -746,10 +738,9 @@ class BoundaryPredictor:
         kernel = np.exp(-(kernel_gridx ** 2 + kernel_gridz ** 2) / smoothness)
         kernel /= np.sum(kernel)
         smoothed_spatial_bounds = np.empty(spatial_array.shape)
-        for i in range(5):
-            smoothed_spatial_bounds[:, :, i] = convolve2d(
-                spatial_array[:, :, i], kernel, boundary="symm", mode="same"
-            )
+
+        for i in range(pred.bounds.shape[1]):
+            smoothed_spatial_bounds[:, :, i] = convolve2d(spatial_array[:, :, i], kernel, boundary="symm", mode="same")
         pred.bounds = LayerPrediction.to_snaking_array(smoothed_spatial_bounds)
 
 
@@ -760,18 +751,17 @@ class LayerClassifier:
     attribute, e.g. in `pred.bounds`
     """
 
-    LAYER_NAMES = np.array(["L1", "L23", "L4", "L5", "L6", "WM"], dtype=object)
     # hard-coded mapping from aligned volume names to the path of that volume's layer prediction
-    ALIGNED_VOL_TO_DATA_PATH = {
-        "minnie65_phase3": os.path.join(
-            os.path.abspath(os.path.dirname(__file__)),
-            "smooth_minnie65_full_prediction.json",
-        )
-    }
+    ALIGNED_VOL_TO_DATA_PATH = {"minnie65_phase3": os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                                                "smooth_minnie65_full_prediction.json"),
+                                "minnie65_phase3-sub6": os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                                                     "smooth_minnie65_sub6_full_prediction.json")}
 
     def __init__(self, data):
         """
-        :param data: name of an aligned volume (e.g. "minnie65_phase3") or path to a jsonified LayerPrediction object.
+        :param data: name of an aligned volume (e.g. "minnie65_phase3"); or path to a jsonified LayerPrediction object;
+                     or name of an aligned volume with any layer subdivisions appended (e.g. "minnie65_phase3-sub6" has
+                     layers 1, 2/3, 4, 5, 6a, 6b, WM)
                         Currently only simple point predictions are supported
                         ( as opposed to predictions generated using LayerPredictor.predict_with_sensitivity() )
         """
@@ -790,7 +780,7 @@ class LayerClassifier:
             self.pred.bounds, self.pred.ngridpts
         )
         self.layer_funcs = []
-        for i in range(5):
+        for i in range(self.pred.bounds.shape[1]):
             self.layer_funcs.append(
                 interpolate.interp2d(
                     self.pred.col_center_xs,
@@ -829,9 +819,8 @@ class LayerClassifier:
                 )
         bounds[:, -1] = 2 ** 30
         for i in range(bounds.shape[1] - 1):
-            results[
-                (bounds[:, i] < pts[:, 1]) & (pts[:, 1] <= bounds[:, i + 1])
-            ] = LayerClassifier.LAYER_NAMES[i]
+            results[(bounds[:, i] < pts[:, 1]) & (pts[:, 1] <= bounds[:, i + 1])] = self.pred.layer_labels[i]
+
         return results
 
     @property
@@ -863,19 +852,11 @@ if __name__ == "__main__":
     seg_low_um = np.array([130_000, 50_000, 15_000]) * resolution / 1_000
     seg_up_um = np.array([355_000, 323_500, 27_500]) * resolution / 1_000
     name = "test"
-    p = BoundaryPredictor(
-        features=("soma_volume",),
-        num_PCA=None,
-        use_depth=False,
-        use_soma_vol_std=True,
-        resolution=resolution,
-        save_figs=True,
-        verbose=True,
-        name=name,
-    )
-    pred = p.predict(
-        np.array([seg_low_um, seg_up_um]), col_size=(100, 100), ngridpts=(2, 2)
-    )
+
+    p = BoundaryPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True,
+                          resolution=resolution, save_figs=False, verbose=True,
+                          name=name)
+    pred = p.predict(np.array([seg_low_um, seg_up_um]), col_size=(100, 100), ngridpts=(2, 2))
 
     c = LayerClassifier(data=f"{name}_prediction.json")
     inpt = pred.cols_nm[0:2, 0].copy()

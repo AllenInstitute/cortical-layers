@@ -1,3 +1,4 @@
+*.csv
 *.pkl
 *.npy
 *.svg
@@ -10,6 +11,8 @@ layermeshes/
 
 !cortical_layers/smooth_minnie65_full_prediction.json
 !cortical_layers/minnie65_full_prediction.json
+!cortical_layers/smooth_minnie65_sub6_full_prediction.json
+!cortical_layers/minnie65_sub6_full_prediction.json
 !requirements.txt
 !features_by_depth.png
 .idea
