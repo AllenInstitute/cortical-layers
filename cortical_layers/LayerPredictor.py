@@ -55,6 +55,7 @@ class LayerPrediction:
             "col_center_zs": self.col_center_zs.tolist(),
             "overall_bbox": self.overall_bbox.tolist(),
             "name": self.name,
+            "layer_labels": self.layer_labels,
             "cache_dir": self.cache_dir,
         }
         with open(os.path.join(self.cache_dir, f"{self.name}.json"), "w") as f:
