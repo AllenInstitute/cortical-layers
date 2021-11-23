@@ -614,11 +614,15 @@ class LayerClassifier:
     """
     # hard-coded mapping from aligned volume names to the path of that volume's layer prediction
     ALIGNED_VOL_TO_DATA_PATH = {"minnie65_phase3": os.path.join(os.path.abspath(os.path.dirname(__file__)),
-                                                                "smooth_minnie65_full_prediction.json")}
+                                                                "smooth_minnie65_full_prediction.json"),
+                                "minnie65_phase3-sub6": os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                                                                     "smooth_minnie65_sub6_full_prediction.json")}
 
     def __init__(self, data):
         """
-        :param data: name of an aligned volume (e.g. "minnie65_phase3") or path to a jsonified LayerPrediction object.
+        :param data: name of an aligned volume (e.g. "minnie65_phase3"); or path to a jsonified LayerPrediction object;
+                     or name of an aligned volume with any layer subdivisions appended (e.g. "minnie65_phase3-sub6" has
+                     layers 1, 2/3, 4, 5, 6a, 6b, WM)
                         Currently only simple point predictions are supported
                         ( as opposed to predictions generated using LayerPredictor.predict_with_sensitivity() )
         """
