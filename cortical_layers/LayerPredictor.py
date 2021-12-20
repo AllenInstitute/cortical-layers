@@ -164,8 +164,11 @@ class BoundaryPredictor:
                This value is updated every time predict_col is called
         :param cache_dir: default: ".", the directory where to store resulting plots and predictions
         :param name: default: "layers", the name of this layer predictor to use for file naming
-        :param l1_2_thresh=120_000: density threshold in mm^-3 to use for determining layer 1-2 border
-        :param l6_WM_thresh=50_000: density threshold in mm^-3 to use for determining layer 6-white matter border
+        :param l1_2_thresh_proportion: default: 0.85, the proportion of the first local maximum density at which to draw
+                the threshold for the layer 1 layer 2 border
+        :param l1_2_thresh=120_000: the minimum density threshold in mm^-3 to use for determining layer 1-2 border.
+               actual threshold will be computed dynamically
+        :param l6_WM_thresh=50_000: the actual density threshold in mm^-3 to use for determining layer 6-white matter border
         :param soma_table_path: The path of the pickled soma features table
         """
         self.bin_width = bin_width
@@ -184,6 +187,7 @@ class BoundaryPredictor:
         )  # from HMM trained on 2 PCA modes in column
         self.name = kwargs["name"] if "name" in kwargs else "layers"
         self.cache_dir = kwargs["cache_dir"] if "cache_dir" in kwargs else "."
+        self.l1_2_thresh_proportion = kwargs["l1_2_thresh_proportion"] if "l1_2_thresh_proportion" in kwargs else 0.85
         self.l1_2_thresh = kwargs["l1_2_thresh"] if "l1_2_thresh" in kwargs else 120_000
         self.l6_WM_thresh = (
             kwargs["l6_WM_thresh"] if "l6_WM_thresh" in kwargs else 50_000
@@ -330,7 +334,7 @@ class BoundaryPredictor:
             bbox = b / self.resolution
             if self.verbose:
                 print("\nWORKING ON", i, bbox)
-            pred.results[i, :] = self._predict_col(bbox, idx=i)
+            pred.bounds[i, :] = self._predict_col(bbox, idx=i)
             if i % 10 == 9:
                 pred.save()
                 plt.close("all")  # free up RAM
@@ -628,14 +632,10 @@ class BoundaryPredictor:
             idx = hmm_layers.index(i)
             bounds.append((bin_centers[idx] + bin_centers[idx - 1]) / 2)
 
-        # linearly interpolate the outermost bounds based on exc soma density
 
-        l1_2_idx = np.nonzero(exc_soma_densities > self.l1_2_thresh)[0][0]
-        l1_2_bound = bin_centers[l1_2_idx - 1] + (
-            bin_centers[l1_2_idx] - bin_centers[l1_2_idx - 1]
-        ) * (self.l1_2_thresh - exc_soma_densities[l1_2_idx - 1]) / (
-            exc_soma_densities[l1_2_idx] - exc_soma_densities[l1_2_idx - 1]
-        )
+        l1_2_thresh = self.get_l1_2_thresh(exc_soma_densities)
+        l1_2_idx = np.nonzero(exc_soma_densities > l1_2_thresh)[0][0]
+        l1_2_bound = bin_centers[l1_2_idx]  # don't do any interpolation on this b/c l1_2_thresh is conservative
         l6_wm_idx = np.nonzero(exc_soma_densities > self.l6_WM_thresh)[0][-1]
         l6_wm_bound = bin_centers[l6_wm_idx] + (
             bin_centers[l6_wm_idx + 1] - bin_centers[l6_wm_idx]
@@ -651,6 +651,17 @@ class BoundaryPredictor:
             print("bounds:", bounds)
 
         return bounds, hmm_layers, posteriors
+
+    def get_l1_2_thresh(self, exc_soma_densities):
+        exc_soma_densities = np.asarray(exc_soma_densities)
+        slope = exc_soma_densities[1:] - exc_soma_densities[:-1]
+        slope = (slope[1:] + slope[:-1]) / 2  # assign each idx to the average of the two slopes on either side
+        first_local_max = np.nonzero((slope < 0) & (exc_soma_densities[1:-1] > self.l1_2_thresh))[0][0]
+
+        thresh = exc_soma_densities[first_local_max] * self.l1_2_thresh_proportion
+        if self.verbose:
+            print(f"threshhold density of {thresh} with first local max at index {first_local_max}")
+        return thresh
 
     @staticmethod
     def in_bbox(p, bbox):
@@ -850,15 +861,20 @@ class LayerClassifier:
 
 if __name__ == "__main__":
     resolution = np.array([4.0, 4.0, 40.0])
+
     # conservative bbox only containing well-segmented areas
     seg_low_um = np.array([130_000, 50_000, 15_000]) * resolution / 1_000
     seg_up_um = np.array([355_000, 323_500, 27_500]) * resolution / 1_000
-    name = "test"
+    name = "minnie65_full"
+    cache_dir = "."
 
     p = BoundaryPredictor(features=("soma_volume",), num_PCA=None, use_depth=False, use_soma_vol_std=True,
-                          resolution=resolution, save_figs=False, verbose=True,
-                          name=name)
-    pred = p.predict(np.array([seg_low_um, seg_up_um]), col_size=(100, 100), ngridpts=(2, 2))
+                          resolution=resolution,
+                          save_figs=True, verbose=True,
+                          name=name, cache_dir=cache_dir,
+                          soma_table_path=os.path.join(cache_dir, "Minnie_soma_nuc_feature_model_83_1.pkl"))
+
+    pred = p.predict(np.array([seg_low_um, seg_up_um]), col_size=(100, 100), ngridpts=(32, 16))
 
     c = LayerClassifier(data=f"{name}_prediction.json")
     inpt = pred.cols_nm[0:2, 0].copy()

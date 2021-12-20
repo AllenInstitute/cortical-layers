@@ -1,2 +1,3 @@
 include requirements.txt
 graft cortical_layers
+exclude cortical_layers/Minnie_soma_nuc_feature_model_83_1.pkl
